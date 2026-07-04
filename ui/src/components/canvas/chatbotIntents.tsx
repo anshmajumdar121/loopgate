@@ -76,7 +76,7 @@ const planIntent: ChatbotIntent = {
     if (!s.plan) return <span className="text-amber-400">No plan yet — still planning.</span>;
     return (
       <div className="space-y-2 text-sm">
-        <div className="font-medium">{s.plan.summary}</div>
+        <div className="font-medium">{s.plan.rawGoal || s.plan.notes}</div>
         {s.plan.filesToTouch?.length ? (
           <ul className="list-disc pl-5 space-y-1">
             {s.plan.filesToTouch.map((f) => (
@@ -136,19 +136,20 @@ const diffIntent: ChatbotIntent = {
     if (!s.diff) return <span className="text-zinc-400">No diff yet.</span>;
     return (
       <div className="space-y-2 text-sm">
-        <div>{s.diff.summary}</div>
+        <div>{s.diff.notes}</div>
         {s.diff.filesChanged?.length ? (
           <ul className="list-disc pl-5 space-y-1">
             {s.diff.filesChanged.map((f) => (
-              <li key={f}>
+              <li key={f.path}>
                 <a
-                  href={`file://${t.workdir}/${f}`}
+                  href={`file://${t.workdir}/${f.path}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="underline text-sky-400 hover:text-sky-300"
                 >
-                  {f}
+                  {f.path}
                 </a>
+                {f.reason ? <span className="text-zinc-500"> — {f.reason}</span> : null}
               </li>
             ))}
           </ul>
@@ -174,13 +175,16 @@ const verdictIntent: ChatbotIntent = {
             {approved ? "APPROVED" : "REJECTED"}
           </span>
         </div>
-        {s.verdict.blockers?.length ? (
+        {s.verdict.requiredFixes?.length ? (
           <div>
-            <div className="text-zinc-400">Blockers:</div>
+            <div className="text-zinc-400">Required fixes:</div>
             <ul className="list-disc pl-5">
-              {s.verdict.blockers.map((b, i) => <li key={i}>{b}</li>)}
+              {s.verdict.requiredFixes.map((b: string, i: number) => <li key={i}>{b}</li>)}
             </ul>
           </div>
+        ) : null}
+        {s.verdict.oneLineReason ? (
+          <div className="text-zinc-400">{s.verdict.oneLineReason}</div>
         ) : null}
       </div>
     );
