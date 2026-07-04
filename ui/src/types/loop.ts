@@ -1,0 +1,350 @@
+// Frontend mirror of backend types (src/types.ts on the server).
+// Kept in sync manually for v1 — would be a shared package in production.
+
+export type TaskStatus =
+  | "draft"
+  | "planning"
+  | "plan_review"
+  | "implementing"
+  | "verifying"
+  | "done"
+  | "escalated"
+  | "cancelled";
+
+export type AgentRole = "orchestrator" | "planner" | "maker" | "verifier" | "system";
+export type LogLevel = "info" | "stdout" | "stderr" | "error";
+
+export interface PlanSummary {
+  steps: number;
+  filesToTouch: string[];
+  criteria: string[];
+  risks: string[];
+  notes: string;
+  rawGoal: string;
+}
+
+export interface DiffFileChange {
+  path: string;
+  reason: string;
+}
+
+export interface DiffSummary {
+  attempt: number;
+  filesChanged: DiffFileChange[];
+  buildExit: number;
+  testsPassed: number;
+  testsFailed: number;
+  testsLintExit: number;
+  notes: string;
+}
+
+export interface CriteriaWalkItem {
+  criterion: string;
+  passed: boolean;
+  evidence: string;
+}
+
+export type VerdictOutcome = "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
+
+export interface Verdict {
+  attempt: number;
+  outcome: VerdictOutcome;
+  buildExit: number;
+  testsPassed: number;
+  testsFailed: number;
+  scopePass: boolean;
+  intentPass: boolean;
+  noCheatingPass: boolean;
+  risk: "LOW" | "MEDIUM" | "HIGH";
+  criteriaWalk: CriteriaWalkItem[];
+  requiredFixes: string[];
+  oneLineReason: string;
+}
+
+export interface HistoryEntry {
+  ts: string;
+  phase: string;
+  message: string;
+}
+
+export interface LogEntry {
+  ts: string;
+  agent: AgentRole;
+  stream: LogLevel;
+  text: string;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  prompt: string;
+  workdir: string;
+  status: TaskStatus;
+  attempt: number;
+  maxAttempts: number;
+  createdAt: string;
+  updatedAt: string;
+  /** Model ID in `provider/model-name` form. */
+  model?: string;
+  plan?: PlanSummary;
+  diff?: DiffSummary;
+  verdict?: Verdict;
+  history: HistoryEntry[];
+  logs: LogEntry[];
+  agentPid?: number;
+  escalationReason?: string;
+  /** Optional project + session this task belongs to. Tasks without
+   *  these stay in the "Unassigned" bucket and never appear inside any
+   *  Project > Session tree. */
+  projectId?: string;
+  sessionId?: string;
+}
+
+/**
+ * A Project is a top-level workspace the user creates ("Loop Agent",
+ * "OpenFlowCut"). Projects contain sessions, and tasks optionally attach
+ * to a session within a project. The hierarchy is Project → Session →
+ * Task.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A Session is a grouping of related tasks within a project. The user
+ * creates them explicitly ("Real Agent Spawning", "Improve UI Nodes") and
+ * tasks that the user starts in this session share its scope.
+ */
+export interface Session {
+  id: string;
+  projectId: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WsClientMessage =
+  | { type: "subscribe"; taskId: string }
+  | { type: "unsubscribe"; taskId: string }
+  | { type: "ping" };
+
+export type WsServerMessage =
+  | { type: "pong" }
+  | { type: "task_update"; taskId: string; task: Task }
+  | { type: "log"; taskId: string; entry: LogEntry }
+  | { type: "phase_change"; taskId: string; from: TaskStatus; to: TaskStatus }
+  | { type: "node_status"; taskId: string; nodeId: string; status: string }
+  | { type: "plan_ready"; taskId: string; plan: PlanSummary }
+  | { type: "diff_ready"; taskId: string; diff: DiffSummary }
+  | { type: "verdict"; taskId: string; verdict: Verdict }
+  | { type: "escalation"; taskId: string; reason: string }
+  | { type: "done"; taskId: string; summary: string }
+  | { type: "error"; taskId: string; message: string }
+  | { type: "task_re_prompted"; taskId: string; prompt: string; attempt: number }
+  | { type: "task_deleted"; taskId: string };
+
+export interface CreateTaskBody {
+  prompt: string;
+  title?: string;
+  workdir?: string;
+  autoApprovePlan?: boolean;
+  model?: string;
+  modelOverrides?: {
+    planning?: string;
+    implementation?: string;
+    review?: string;
+  };
+  /** Optional scoping. When `projectId` is set, the task shows under that
+   *  project in the sidebar; when `sessionId` is also set, it nests under
+   *  the session within the project. Either may be set independently of
+   *  the other (an unassigned session within a project is valid). */
+  projectId?: string;
+  sessionId?: string;
+}
+
+/** Curated list of model options shown in the New Task modal. The
+ *  picker writes the chosen `provider/model-name` into `Task.model`,
+ *  which the spawner forwards to opencode via env + CLI flag. When unset,
+ *  the orchestrator falls back to whatever's configured in `opencode.json`. */
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  /** Short, plain-language description shown next to the label. */
+  blurb: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connections — user-configured external API endpoints (OpenAI-compatible,
+// Anthropic-compatible). Models exposed by connections show up in the
+// model picker alongside the curated MODEL_OPTIONS.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ConnectionProviderType =
+  | "openai-compatible"
+  | "anthropic-compatible";
+
+/** Curated provider ids. Drives the provider dropdown in the Connections UI
+ *  — each id maps to a preset with default endpoint, model list, hints.
+ *  "custom" is the BYO-endpoint catch-all. */
+export type ConnectionProviderId =
+  | "openrouter"
+  | "openai"
+  | "anthropic"
+  | "google"
+  | "ollama"
+  | "custom";
+
+export interface ConnectionModel {
+  id: string;
+  label?: string;
+  contextWindow?: number;
+}
+
+export type ConnectionRole = "planning" | "implementation" | "review";
+
+export interface Connection {
+  id: string;
+  name: string;
+  description?: string;
+  providerId?: ConnectionProviderId;
+  providerType: ConnectionProviderType;
+  baseUrl: string;
+  hasApiKey: boolean;
+  /** Single-model form: the upstream's model id. The picker exposes this
+   *  connection as ONE option (the one selected model). */
+  model?: string;
+  modelLabel?: string;
+  temperature?: number;
+  /** Agent roles this connection is "dedicated to". When a role is listed,
+   *  the connection surfaces at the top of the model picker for that
+   *  role with a "Dedicated" badge — semantically it's the user's
+   *  preferred model for that phase. A connection can be dedicated to
+   *  multiple roles. Empty array / undefined = general use. */
+  roles?: ConnectionRole[];
+  /** Legacy multi-model form. Rendered as multiple picker options when
+   *  `model` is absent. */
+  models?: ConnectionModel[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertConnectionBody {
+  name: string;
+  description?: string;
+  providerId?: ConnectionProviderId;
+  providerType: ConnectionProviderType;
+  baseUrl: string;
+  /** Optional. On PATCH: omit to keep existing; empty string clears it. */
+  apiKey?: string;
+  /** Single-model form (preferred): the upstream model id. */
+  model?: string;
+  modelLabel?: string;
+  temperature?: number;
+  /** Optional role dedication: which agent roles this connection powers. */
+  roles?: ConnectionRole[];
+  /** Legacy multi-model form: list of models. Rendered as one picker entry
+   *  per model when `model` is absent. */
+  models?: ConnectionModel[];
+}
+
+/** Build the model id used internally when referring to a model that
+ *  comes from a user-defined Connection. Format: `custom:<connId>:<modelId>`. */
+export function customModelId(connId: string, modelId: string): string {
+  return `custom:${connId}:${modelId}`;
+}
+
+/** Inverse of `customModelId`. Returns null if the id isn't a custom one. */
+export function parseCustomModelId(
+  modelId: string
+): { connId: string; modelId: string } | null {
+  if (!modelId.startsWith("custom:")) return null;
+  const parts = modelId.split(":");
+  if (parts.length < 3) return null;
+  return {
+    connId: parts[1],
+    modelId: parts.slice(2).join(":"),
+  };
+}
+
+/**
+ * Flat list of models (curated + custom), shaped like ModelOption so the
+ * existing pickers can render them unchanged.
+ *
+ * Connections can be in either of two shapes:
+ *   - Single-model form (`connection.model` set): contributes exactly ONE
+ *     picker option — the user already chose which model to use when
+ *     configuring the connection.
+ *   - Legacy multi-model form (`connection.models[]` set): contributes
+ *     one picker option per model — kept for back-compat with v1.
+ */
+export function dynamicModelOptions(
+  conns: Array<
+    Pick<Connection, "id" | "name" | "baseUrl"> &
+      Partial<Pick<Connection, "model" | "modelLabel" | "models">>
+  >
+): ModelOption[] {
+  const custom: ModelOption[] = [];
+  for (const c of conns) {
+    if (c.model) {
+      custom.push({
+        id: customModelId(c.id, c.model),
+        label: c.modelLabel || c.model,
+        provider: `via ${c.name}`,
+        blurb: `${c.model} on ${c.baseUrl}`,
+      });
+    } else if (c.models) {
+      for (const m of c.models) {
+        custom.push({
+          id: customModelId(c.id, m.id),
+          label: m.label || m.id,
+          provider: `via ${c.name}`,
+          blurb: `${m.id} on ${c.baseUrl}`,
+        });
+      }
+    }
+  }
+  // Curated first, custom after — keeps the "familiar defaults" section at
+  // the top so users can pick from those without scrolling past user additions.
+  return [...MODEL_OPTIONS, ...custom];
+}
+
+export const MODEL_OPTIONS: ModelOption[] = [
+  {
+    id: "opencode-go/minimax-m3",
+    label: "MiniMax-M3",
+    provider: "opencode-go",
+    blurb: "Default. Fast + cheap. Good for everyday tasks.",
+  },
+  {
+    id: "anthropic/claude-sonnet-4.5",
+    label: "Claude Sonnet 4.5",
+    provider: "anthropic",
+    blurb: "Strong reasoning. Best for nuanced planning.",
+  },
+  {
+    id: "openai/gpt-5",
+    label: "GPT-5",
+    provider: "openai",
+    blurb: "Careful verifier. Best for catch-the-bug reviews.",
+  },
+  {
+    id: "google/gemini-2.5-pro",
+    label: "Gemini 2.5 Pro",
+    provider: "google",
+    blurb: "Balanced speed + quality. Good middle ground.",
+  },
+  {
+    id: "ollama/llama-3.3-70b",
+    label: "Local Ollama (Llama 3.3 70B)",
+    provider: "ollama",
+    blurb: "Runs on your CPU. Slowest, fully private.",
+  },
+];
+
+export const DEFAULT_MODEL_ID = "opencode-go/minimax-m3";
