@@ -1,0 +1,1156 @@
+// Loop orchestrator — drives plan → implement → verify → exit.
+//
+// Phase 1 (PLAN):
+//   - Spawn loop-planner; await change to GOAL.md; parse plan; broadcast.
+//   - Block on waitForEvent("confirm-plan") for user confirmation.
+//
+// Phase 2 + 3 (IMPLEMENT ↔ VERIFY) loop, up to maxAttempts:
+//   - Spawn loop-maker; await change to STATE.md; parse diff.
+//   - Spawn loop-verifier; await change to STATE.md; parse verdict.
+//   - APPROVE → DONE, exit.
+//   - REJECT and attempt < max → await feedback, increment attempt, retry.
+//   - REJECT and attempt >= max → ESCALATED.
+//   - ESCALATE_HUMAN → ESCALATED, exit.
+//
+// Real subprocess plumbing lives in `agent-spawner.ts`. File-watching lives in
+// `state-sync.ts`. Markdown → typed data lives in `parser.ts`. This module
+// just stitches them together and broadcasts the same WS events the mock
+// version emitted, so the UI integration is unchanged.
+
+import {
+  appendHistory,
+  appendLog,
+  clearPendingResolvers,
+  getTask,
+  resolveEvent,
+  setStatus,
+  updateTask,
+  waitForEvent,
+} from "../store/tasks.js";
+import { broadcaster } from "../ws/broadcaster.js";
+import type {
+  AgentRole,
+  Connection,
+  LogLevel,
+  PlanSummary,
+  Task,
+  TaskStatus,
+} from "../types.js";
+import { modelOverrideKeyForRole } from "../types.js";
+import {
+  parsePlanGoal,
+  parseStateDiff,
+} from "./parser.js";
+import {
+  killAgent,
+  spawnAgent,
+  type AgentHandle,
+} from "./agent-spawner.js";
+import { watchFiles, type FileWatcher, type WatchedFile } from "./state-sync.js";
+import { resolveConnectionModel } from "../store/connections.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tunables
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Per-phase timeout. Real agent runs can take a few minutes; the orchestrator
+ *  escalates if any phase doesn't produce its file in time. */
+const PHASE_TIMEOUT_MS = Number(process.env.LOOP_PHASE_TIMEOUT_MS || 5 * 60_000);
+
+/** Maximum number of times the user can request "Adjust & Re-plan" before
+ *  we escalate. Beyond this, ping-ponging on the plan usually means the
+ *  user's intent isn't converging on something the planner can produce —
+ *  better to hand off to a human than burn cycles. */
+const MAX_PLAN_ADJUSTS = 3;
+
+/** Poll interval for checking cancellation while we await a file change. */
+const CANCEL_POLL_MS = 250;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loop registry
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ACTIVE_LOOPS = new Set<string>();
+
+/**
+ * Carries the user's feedback from one REJECT verdict to the next attempt's
+ * maker prompt. We keep this OUTSIDE the task store because `updateTask`
+ * shallow-spreads into a fresh object on every status/field change — any
+ * mutation we'd do on the old reference is discarded by the next
+ * `getTask()` call. Module-level map keyed by taskId is the simplest carrier
+ * that survives across iterations and is cleaned up in the loop's `finally`.
+ */
+const LAST_FEEDBACK = new Map<string, string>();
+
+export function isLoopRunning(taskId: string): boolean {
+  return ACTIVE_LOOPS.has(taskId);
+}
+
+export function stopLoop(taskId: string): void {
+  // Unblock any pending awaits by resolving them with `undefined`.
+  // `clearPendingResolvers` fires the resolver with undefined; the
+  // orchestrator's post-await checks treat that as "stop requested".
+  clearPendingResolvers(taskId);
+  // Kill any live agent subprocess so the watcher stops waiting for a file
+  // write that will never come.
+  killAgent(taskId);
+  ACTIVE_LOOPS.delete(taskId);
+  setStatus(taskId, "cancelled", "User stopped the loop");
+  const task = getTask(taskId);
+  if (task) {
+    broadcaster.broadcast(taskId, { type: "task_update", taskId, task });
+  }
+}
+
+/**
+ * Helper for the orchestrator body: returns true if the task was cancelled
+ * since the last await/phase, and logs the appropriate banner. Call sites:
+ *   if (bailIfCancelled(taskId, log, "during plan review")) return;
+ *
+ * Each phase transition is preceded by this check so the orchestrator
+ * doesn't overwrite the "cancelled" status with a new phase (planning →
+ * plan_review → implementing → …) AFTER the user already pressed Stop.
+ * Without this, the cancelled state could silently revert to whatever
+ * phase the loop was entering when stop fired.
+ */
+function bailIfCancelled(
+  taskId: string,
+  log: (a: AgentRole, s: LogLevel, t: string) => void,
+  where: string
+): boolean {
+  if (!isCancelled(taskId)) return false;
+  const task = getTask(taskId);
+  if (task && task.status === "cancelled") {
+    log(
+      "orchestrator",
+      "info",
+      `■ loop cancelled ${where} — preserving "cancelled" status`
+    );
+  }
+  return true;
+}
+
+/**
+ * Resume a previously stopped (status=cancelled) task. Picks up from the
+ * phase the task was in when stopped:
+ *   - had a plan + diff → go to plan_review (re-approve + re-implement)
+ *   - had a plan only   → go to plan_review (re-approve + implement)
+ *   - no plan yet       → go to draft (user re-triggers planning)
+ *
+ * The orchestrator picks up the existing plan/diff as the starting point
+ * rather than re-deriving from scratch. The attempt counter is NOT
+ * incremented — Resume is a continuation, not a retry.
+ *
+ * Returns false if the task isn't in a resumable state, or true after
+ * re-arming the loop (the actual runLoop promise is fire-and-forget).
+ */
+export function resumeLoop(taskId: string): boolean {
+  const task = getTask(taskId);
+  if (!task) return false;
+  if (task.status !== "cancelled" && task.status !== "escalated") {
+    // Resumable only after a hard-stop or escalation. Done tasks are
+    // terminal; active tasks can't be "resumed" — they're already running.
+    return false;
+  }
+  if (ACTIVE_LOOPS.has(taskId)) return false; // already running
+
+  // Restore the prior phase so runLoop skips ahead to where we were.
+  // Priority: had a diff → verifying (re-verify the existing diff).
+  //           had a plan only → plan_review.
+  //           no plan yet → draft (the loop will start at planning phase).
+  const restartStatus: TaskStatus = task.diff
+    ? "verifying"
+    : task.plan
+    ? "plan_review"
+    : "draft";
+
+  // Clear the cancellation/escalation reason — we own the next attempt
+  // now. Keep plan + diff so the resumed loop can use them as inputs.
+  updateTask(taskId, {
+    status: restartStatus,
+    escalationReason: undefined,
+  });
+  const updated = getTask(taskId);
+  if (updated) {
+    broadcaster.broadcast(taskId, { type: "task_update", taskId, task: updated });
+  }
+
+  // Fire-and-forget; runLoop handles its own errors and state transitions.
+  void runLoop(taskId).catch((err) => {
+    console.error(`[orchestrator] resumed loop ${taskId} crashed:`, err);
+  });
+  return true;
+}
+
+/**
+ * Reset a task back to its initial state and start a fresh loop. Unlike
+ * Resume, this:
+ *   - Clears plan, diff, verdict, history (start over)
+ *   - Increments attempt counter (each reset counts as a fresh attempt)
+ *   - Begins at planning phase regardless of prior progress
+ *
+ * Returns false if the task doesn't exist or is currently running.
+ */
+export function resetTask(taskId: string): boolean {
+  const task = getTask(taskId);
+  if (!task) return false;
+  if (ACTIVE_LOOPS.has(taskId)) return false;
+
+  const nextAttempt = task.attempt + 1;
+  if (task.maxAttempts > 0 && nextAttempt > task.maxAttempts) {
+    // Hit the cap — don't reset, surface as escalation instead.
+    setStatus(taskId, "escalated", "Reset cap reached (max attempts)");
+    const updated = getTask(taskId);
+    if (updated) {
+      broadcaster.broadcast(taskId, { type: "task_update", taskId, task: updated });
+    }
+    return false;
+  }
+
+  updateTask(taskId, {
+    status: "draft",
+    plan: undefined,
+    diff: undefined,
+    verdict: undefined,
+    escalationReason: undefined,
+    attempt: nextAttempt,
+    history: [],
+    logs: [],
+  });
+  const updated = getTask(taskId);
+  if (updated) {
+    broadcaster.broadcast(taskId, { type: "task_update", taskId, task: updated });
+  }
+
+  void runLoop(taskId).catch((err) => {
+    console.error(`[orchestrator] reset loop ${taskId} crashed:`, err);
+  });
+  return true;
+}
+
+/**
+ * Re-prompt a task with a new user prompt. Unlike `resetTask`:
+ *   - Overwrites the prompt (resetTask keeps the original)
+ *   - Increments attempt counter
+ *   - Clears plan/diff/verdict/history/logs
+ *   - Begins a fresh loop from the planning phase
+ *
+ * Returns false if the task does not exist or is in a terminal state
+ * (approved/done). Caller should map `false` to a 409 response.
+ */
+export function rePrompt(taskId: string, newPrompt: string): boolean {
+  const task = getTask(taskId);
+  if (!task) return false;
+  if (task.status === "done") return false;
+
+  // Stop current loop if running (graceful — same path as POST /:id/stop).
+  if (isLoopRunning(taskId)) stopLoop(taskId);
+
+  const nextAttempt = (task.attempt ?? 0) + 1;
+  updateTask(taskId, {
+    prompt: newPrompt,
+    attempt: nextAttempt,
+    status: "draft",
+    plan: undefined,
+    diff: undefined,
+    verdict: undefined,
+    escalationReason: undefined,
+    history: [],
+    logs: [],
+  });
+
+  const updated = getTask(taskId);
+  if (updated) {
+    broadcaster.broadcast(taskId, { type: "task_update", taskId, task: updated });
+    broadcaster.broadcast(taskId, {
+      type: "task_re_prompted",
+      taskId,
+      prompt: newPrompt,
+      attempt: nextAttempt,
+    });
+  }
+
+  void runLoop(taskId).catch((err) => {
+    console.error(`[orchestrator] re-prompt loop ${taskId} crashed:`, err);
+  });
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main entry — runLoop
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Run the full plan → implement → verify → exit loop for a task. The function
+ * is fire-and-forget from the API layer (`api/tasks.ts` calls `void runLoop`).
+ * Any unhandled error is captured into the task's status as "escalated" and
+ * broadcast as a WS `error` event.
+ */
+export async function runLoop(taskId: string): Promise<void> {
+  if (ACTIVE_LOOPS.has(taskId)) {
+    throw new Error("Loop already running for this task");
+  }
+  ACTIVE_LOOPS.add(taskId);
+
+  // ── Helpers (closure over taskId) ────────────────────────────────────────
+  const emit = (status: TaskStatus, message?: string) => {
+    const prev = getTask(taskId);
+    if (!prev) return;
+    const next = setStatus(taskId, status, message) ?? undefined;
+    if (prev.status !== status && next) {
+      broadcaster.broadcast(taskId, {
+        type: "phase_change",
+        taskId,
+        from: prev.status,
+        to: status,
+      });
+    }
+    if (next) {
+      broadcaster.broadcast(taskId, { type: "task_update", taskId, task: next });
+    }
+    return next;
+  };
+
+  const log = (agent: AgentRole, stream: LogLevel, text: string) => {
+    appendLog(taskId, agent, stream, text);
+    broadcaster.broadcastLog(taskId, agent, stream, text);
+  };
+
+  const nodeStatus = (nodeId: string, status: string) => {
+    broadcaster.broadcast(taskId, { type: "node_status", taskId, nodeId, status });
+  };
+
+  // File watcher — scoped to this loop run.
+  const initialTask = getTask(taskId);
+  if (!initialTask) {
+    ACTIVE_LOOPS.delete(taskId);
+    return;
+  }
+  const watcher: FileWatcher = watchFiles(initialTask.workdir);
+
+  // ─── Validate custom-connection model picks ───────────────────────────
+  // If the task's default model OR any per-role override references a
+  // `custom:<connId>:<upstreamId>` whose connection has been deleted
+  // since the task was created, fail fast with a clear escalation. The
+  // user can then pick a different model from Connections, or recreate
+  // the connection with the same id (not currently exposed).
+  const validatedModelIds = new Set<string>();
+  const validateRefs = async (): Promise<boolean> => {
+    const candidates = [
+      initialTask.model,
+      initialTask.modelOverrides?.planning,
+      initialTask.modelOverrides?.implementation,
+      initialTask.modelOverrides?.review,
+    ];
+    for (const m of candidates) {
+      if (!m || validatedModelIds.has(m)) continue;
+      validatedModelIds.add(m);
+      const resolved = resolveConnectionModel(m);
+      if (m.startsWith("custom:") && !resolved) {
+        const reason = `Connection for model "${m}" was deleted. Re-create the connection in the sidebar (Connections view) or pick a different model, then start a new task.`;
+        log("orchestrator", "error", `■ ${reason}`);
+        await escalate(taskId, reason, log, emit);
+        return false;
+      }
+      if (resolved?.connection && !resolved.connection.apiKey) {
+        const reason = `Connection "${resolved.connection.name}" has no API key set. Edit it via Connections → Edit → paste the key.`;
+        log("orchestrator", "error", `■ ${reason}`);
+        await escalate(taskId, reason, log, emit);
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!(await validateRefs())) {
+    ACTIVE_LOOPS.delete(taskId);
+    return;
+  }
+
+try {
+    // ─── Resume-skip: if the task already has a saved plan (came in via
+    // /resume with status="plan_review"), skip Phase 1 entirely and start
+    // the maker. The user explicitly wanted to continue from where they
+    // stopped — re-running the planner would discard their prior approval.
+    const skipPlanning =
+      initialTask.status === "plan_review" && Boolean(initialTask.plan);
+    if (skipPlanning) {
+      log(
+        "orchestrator",
+        "info",
+        `▶ RESUME — skipping planning, saved plan has ${initialTask.plan!.steps} steps`
+      );
+      appendHistory(
+        taskId,
+        "implementing",
+        "Resumed with saved plan — skipping re-plan"
+      );
+    }
+
+    // ─── Phase 1: PLAN (with confirm/adjust loop) ────────────────────────
+    // The planner agent runs once for the initial plan, then re-runs on
+    // each "Adjust & Re-plan" request from the user. We cap the number of
+    // adjustments (MAX_PLAN_ADJUSTS) — beyond that we escalate, since
+    // ping-ponging on the plan usually means the user's intent isn't
+    // converging on something the planner can produce.
+    let currentGoalContent = "";
+    let currentAdjustments = "";
+    let planAdjustCount = 0;
+
+    while (true) {
+      if (skipPlanning) {
+        // Resume-skip path: jump straight to Phase 2 with the saved plan.
+        // currentGoalContent isn't needed by the maker (it reads GOAL.md
+        // from disk), but set it for logging consistency.
+        currentGoalContent = initialTask.plan?.rawGoal ?? "";
+        break;
+      }
+      if (isCancelled(taskId)) {
+        log("orchestrator", "info", "■ loop cancelled during planning");
+        return;
+      }
+
+      const isReplan = planAdjustCount > 0;
+      emit("planning", isReplan
+        ? `Re-planning with user adjustments (${planAdjustCount}/${MAX_PLAN_ADJUSTS})`
+        : "Orchestrator dispatching loop-planner");
+      log(
+        "orchestrator",
+        "info",
+        isReplan
+          ? `▶ RE-PLAN attempt ${planAdjustCount}/${MAX_PLAN_ADJUSTS}`
+          : `▶ PLAN — dispatching loop-planner`
+      );
+      nodeStatus("planner", "running");
+
+      const plannerPrompt = isReplan
+        ? buildAdjustPlannerPrompt(initialTask.prompt, currentAdjustments, currentGoalContent)
+        : buildPlannerPrompt(initialTask.prompt);
+      const plannerTarget = resolveSpawnTarget(initialTask, "planner");
+      const planner = spawnPlanner(
+        taskId,
+        initialTask.workdir,
+        plannerPrompt,
+        log,
+        plannerTarget.model,
+        plannerTarget.connection
+      );
+
+      const goalContent = await awaitPhaseOutput(
+        watcher,
+        "GOAL.md",
+        planner,
+        PHASE_TIMEOUT_MS,
+        taskId
+      );
+      log("planner", "stdout", `planner wrote GOAL.md (${goalContent.length} chars)`);
+
+      // If the user pressed Stop while the planner was writing, don't
+      // bother parsing + saving the plan — the cancellation is final.
+      if (bailIfCancelled(taskId, log, "after planner write")) return;
+
+      const plan: PlanSummary = parsePlanGoal(goalContent);
+      updateTask(taskId, { plan });
+      appendHistory(
+        taskId,
+        "planning",
+        isReplan
+          ? `Re-plan ${planAdjustCount}/${MAX_PLAN_ADJUSTS}: ${plan.steps} steps, ${plan.filesToTouch.length} files`
+          : `Planner returned ${plan.steps} steps, ${plan.filesToTouch.length} files`
+      );
+
+      nodeStatus("planner", "success");
+      broadcaster.broadcast(taskId, { type: "plan_ready", taskId, plan });
+      broadcaster.broadcast(taskId, {
+        type: "task_update",
+        taskId,
+        task: getTask(taskId)!,
+      });
+      log("planner", "stdout", `✓ PLAN READY — ${plan.steps} steps, criteria: ${plan.criteria.length}`);
+
+      // Bail BEFORE emitting plan_review — otherwise we'd overwrite a
+      // stop that fired while the planner was running.
+      if (bailIfCancelled(taskId, log, "after planning")) return;
+
+      emit("plan_review", isReplan ? "Review the re-planned version" : "Awaiting user confirmation");
+      log("orchestrator", "info", `⏸ PLAN REVIEW — waiting for confirm or adjust (${planAdjustCount}/${MAX_PLAN_ADJUSTS} adjusts so far)`);
+      nodeStatus("plan_review", "running");
+
+      // Block until user confirms OR adjusts. The two event kinds are
+      // registered as separate promises so resolveEvent() picks the right
+      // one when the matching endpoint fires.
+      const confirmPromise = waitForEvent(taskId, "confirm-plan");
+      const adjustPromise = waitForEvent(taskId, "adjust-plan");
+      const reviewResult = await Promise.race([
+        confirmPromise.then((v) => ({ kind: "confirm" as const, value: v })),
+        adjustPromise.then((v) => ({ kind: "adjust" as const, value: v })),
+      ]);
+
+      if (isCancelled(taskId)) {
+        log("orchestrator", "info", "■ loop cancelled during plan review");
+        return;
+      }
+
+      if (reviewResult.kind === "confirm") {
+        const adjustments = extractAdjustments(reviewResult.value);
+        log(
+          "orchestrator",
+          "info",
+          adjustments
+            ? `▶ user confirmed plan with adjustments (${adjustments.length} chars)`
+            : "▶ user confirmed plan"
+        );
+        nodeStatus("plan_review", "success");
+        // Exit the confirm/adjust loop — fall through to Phase 2.
+        break;
+      }
+
+      // reviewResult.kind === "adjust"
+      const adjustText = extractAdjustments(reviewResult.value);
+      if (!adjustText) {
+        // Shouldn't happen — the API endpoint validates non-empty — but
+        // treat a missing adjustment as a confirm instead of looping forever.
+        log("orchestrator", "info", "▶ adjust-plan received with empty text — treating as confirm");
+        nodeStatus("plan_review", "success");
+        break;
+      }
+
+      planAdjustCount += 1;
+      currentAdjustments = adjustText;
+      currentGoalContent = goalContent;
+
+      if (planAdjustCount >= MAX_PLAN_ADJUSTS) {
+        // Cap reached — escalate rather than ping-pong forever.
+        nodeStatus("plan_review", "error");
+        const reason = `Plan adjusted ${MAX_PLAN_ADJUSTS} times without confirmation. The user's intent may not be converging — manual review needed.`;
+        escalate(taskId, reason, log, emit);
+        return;
+      }
+
+      log(
+        "orchestrator",
+        "info",
+        `▶ user requested adjust (${planAdjustCount}/${MAX_PLAN_ADJUSTS}, ${adjustText.length} chars) — re-spawning planner`
+      );
+      nodeStatus("plan_review", "success");
+      // Loop continues — re-spawn planner with the adjustments + existing plan.
+    }
+
+    // ─── Phase 2 + 3: IMPLEMENT ↔ VERIFY ────────────────────────────────
+    while (true) {
+      if (isCancelled(taskId)) {
+        log("orchestrator", "info", "■ loop cancelled");
+        return;
+      }
+
+      const task = getTask(taskId);
+      if (!task) return;
+      if (task.attempt >= task.maxAttempts) {
+        break;
+      }
+
+      const attempt = task.attempt + 1;
+      updateTask(taskId, { attempt });
+
+      // Bail before flipping to "implementing" if the user stopped us
+      // while the previous phase was winding down.
+      if (bailIfCancelled(taskId, log, "before implementation")) return;
+
+      // ─── Phase 2: IMPLEMENT ──────────────────────────────────────────
+      emit("implementing", `Attempt ${attempt}: dispatching loop-maker`);
+      log("maker", "info", `▶ IMPLEMENT attempt ${attempt}`);
+      nodeStatus("maker", "running");
+
+      const latestGoal = watcher.getLatestContent("GOAL.md") ?? currentGoalContent;
+      const latestState = watcher.getLatestContent("STATE.md");
+      const feedback = LAST_FEEDBACK.get(taskId);
+      const makerPrompt = buildMakerPrompt(
+        attempt,
+        task.maxAttempts,
+        latestGoal,
+        latestState,
+        feedback
+      );
+      const makerTarget = resolveSpawnTarget(task, "maker");
+      const maker = spawnMaker(
+        taskId,
+        task.workdir,
+        makerPrompt,
+        log,
+        makerTarget.model,
+        makerTarget.connection
+      );
+
+      let stateAfterMake: string;
+      try {
+        stateAfterMake = await awaitPhaseOutput(
+          watcher,
+          "STATE.md",
+          maker,
+          PHASE_TIMEOUT_MS,
+          taskId
+        );
+      } catch (err) {
+        if (isCancelled(taskId)) {
+          // stopLoop already set status + broadcast — nothing more to do.
+          return;
+        }
+        log("maker", "stderr", `✗ IMPLEMENT FAILED — ${errorMsg(err)}`);
+        nodeStatus("maker", "error");
+        escalate(
+          taskId,
+          `Maker failed on attempt ${attempt}: ${errorMsg(err)}`,
+          log,
+          emit
+        );
+        return;
+      }
+
+      const { diff } = parseStateDiff(stateAfterMake);
+      if (!diff) {
+        log(
+          "maker",
+          "stderr",
+          "✗ maker wrote STATE.md but no Diff Summary section was found"
+        );
+        nodeStatus("maker", "error");
+        escalate(
+          taskId,
+          `Maker output on attempt ${attempt} had no Diff Summary section`,
+          log,
+          emit
+        );
+        return;
+      }
+
+      updateTask(taskId, { diff });
+      appendHistory(
+        taskId,
+        "implementing",
+        `Diff: ${diff.filesChanged.length} files, build exit ${diff.buildExit}, tests ${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`
+      );
+      broadcaster.broadcast(taskId, { type: "diff_ready", taskId, diff });
+      nodeStatus("maker", "success");
+      broadcaster.broadcast(taskId, {
+        type: "task_update",
+        taskId,
+        task: getTask(taskId)!,
+      });
+      log(
+        "maker",
+        "stdout",
+        `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
+      );
+
+      // Bail if the user stopped us between implement and verify.
+      if (bailIfCancelled(taskId, log, "before verification")) return;
+
+      // ─── Phase 3: VERIFY ─────────────────────────────────────────────
+      emit("verifying", `Attempt ${attempt}: dispatching loop-verifier`);
+      log("verifier", "info", `▶ VERIFY attempt ${attempt}`);
+      nodeStatus("verifier", "running");
+
+      const verifierPrompt = buildVerifierPrompt(
+        attempt,
+        latestGoal,
+        stateAfterMake
+      );
+      const verifierTarget = resolveSpawnTarget(task, "verifier");
+      const verifier = spawnVerifier(
+        taskId,
+        task.workdir,
+        verifierPrompt,
+        log,
+        verifierTarget.model,
+        verifierTarget.connection
+      );
+
+      let stateAfterVerify: string;
+      try {
+        stateAfterVerify = await awaitPhaseOutput(
+          watcher,
+          "STATE.md",
+          verifier,
+          PHASE_TIMEOUT_MS,
+          taskId
+        );
+      } catch (err) {
+        if (isCancelled(taskId)) {
+          // stopLoop already set status + broadcast — nothing more to do.
+          return;
+        }
+        log("verifier", "stderr", `✗ VERIFY FAILED — ${errorMsg(err)}`);
+        nodeStatus("verifier", "error");
+        escalate(
+          taskId,
+          `Verifier failed on attempt ${attempt}: ${errorMsg(err)}`,
+          log,
+          emit
+        );
+        return;
+      }
+
+      const { verdict } = parseStateDiff(stateAfterVerify);
+      if (!verdict) {
+        log(
+          "verifier",
+          "stderr",
+          "✗ verifier wrote STATE.md but no Verifier Verdict section was found"
+        );
+        nodeStatus("verifier", "error");
+        escalate(
+          taskId,
+          `Verifier output on attempt ${attempt} had no Verdict section`,
+          log,
+          emit
+        );
+        return;
+      }
+
+      updateTask(taskId, { verdict });
+      appendHistory(
+        taskId,
+        "verifying",
+        `Verdict: ${verdict.outcome}${verdict.outcome === "REJECT" ? ` — ${verdict.oneLineReason}` : ""}`
+      );
+      broadcaster.broadcast(taskId, { type: "verdict", taskId, verdict });
+      nodeStatus(
+        "verifier",
+        verdict.outcome === "APPROVE" ? "success" : "error"
+      );
+      broadcaster.broadcast(taskId, {
+        type: "task_update",
+        taskId,
+        task: getTask(taskId)!,
+      });
+      log("verifier", "stdout", `✓ VERDICT ${verdict.outcome} — ${verdict.oneLineReason}`);
+
+      // ─── Phase 4: DECIDE ─────────────────────────────────────────────
+      if (verdict.outcome === "APPROVE") {
+        emit("done", "Verifier APPROVE — loop complete");
+        broadcaster.broadcast(taskId, {
+          type: "done",
+          taskId,
+          summary: `Task approved on attempt ${attempt}.`,
+        });
+        log("orchestrator", "info", `■ DONE — approved attempt ${attempt}`);
+        return;
+      }
+
+      if (verdict.outcome === "ESCALATE_HUMAN") {
+        updateTask(taskId, { escalationReason: verdict.oneLineReason });
+        emit("escalated", `Escalated: ${verdict.oneLineReason}`);
+        broadcaster.broadcast(taskId, {
+          type: "escalation",
+          taskId,
+          reason: verdict.oneLineReason,
+        });
+        log("orchestrator", "info", `■ ESCALATED — ${verdict.oneLineReason}`);
+        return;
+      }
+
+      // REJECT — block for user feedback before the next attempt
+      nodeStatus("verdict", "waiting");
+      log(
+        "orchestrator",
+        "info",
+        `⏸ REJECT — awaiting user feedback before attempt ${attempt + 1}`
+      );
+      const feedbackResult = (await waitForEvent(taskId, "feedback")) as
+        | { feedback?: string }
+        | undefined;
+      if (isCancelled(taskId)) {
+        log("orchestrator", "info", "■ loop cancelled while waiting for feedback");
+        return;
+      }
+      const userFeedback =
+        feedbackResult && typeof feedbackResult.feedback === "string"
+          ? feedbackResult.feedback
+          : "";
+      if (userFeedback.length > 0) {
+        log(
+          "orchestrator",
+          "info",
+          `▶ user feedback received (${userFeedback.length} chars) — retrying`
+        );
+        // Stash the feedback so the next iteration's maker prompt can include
+        // it. Kept in a module-level Map (see LAST_FEEDBACK at the top of this
+        // file) — don't put it on the task object, since updateTask replaces
+        // it and the mutation would be lost.
+        LAST_FEEDBACK.set(taskId, userFeedback);
+      } else {
+        log("orchestrator", "info", "▶ auto-continue triggered");
+      }
+    }
+
+    // Max attempts exhausted — escalate
+    const reason = `Exceeded max ${getTask(taskId)?.maxAttempts} attempts without APPROVE.`;
+    escalate(taskId, reason, log, emit);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // If the user stopped the loop, stopLoop already set status + broadcast.
+    // Don't overwrite it with an "escalated" status.
+    if (!isCancelled(taskId)) {
+      appendLog(taskId, "system", "error", `Loop crashed: ${message}`);
+      broadcaster.broadcast(taskId, { type: "error", taskId, message });
+      setStatus(taskId, "escalated", `Crashed: ${message}`);
+      const t = getTask(taskId);
+      if (t) {
+        broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t });
+      }
+    }
+  } finally {
+    watcher.stop();
+    killAgent(taskId);
+    ACTIVE_LOOPS.delete(taskId);
+    LAST_FEEDBACK.delete(taskId);
+    clearPendingResolvers(taskId);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase output helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Wait for a phase's expected file change, racing against the agent's exit
+ * (in case the agent died before writing) and against cancellation.
+ *
+ * Returns the new content of `filename`. Throws on:
+ *   - Phase timeout (no file change within `timeoutMs`)
+ *   - Agent exit without writing the file (no generation advance, even after
+ *     a grace period for chokidar to deliver the change event)
+ *   - Task cancellation while waiting
+ *
+ * Why the grace period: chokidar's fsevent on macOS can lag the fs write by
+ * 100–300ms, and readFile adds another few ms. The mock agent writes the file
+ * then immediately calls deliverExit (after a 100ms streamDone sleep). Without
+ * the grace period, exitPromise can win the race at ~t=1000ms even though the
+ * watcher would have observed the change at ~t=920ms if given another beat.
+ * We give the watcher 500ms after agent exit before declaring failure — long
+ * enough for chokidar + readFile, short enough that a real crash escalates
+ * within a second of the agent actually dying.
+ */
+async function awaitPhaseOutput(
+  watcher: FileWatcher,
+  filename: WatchedFile,
+  agent: AgentHandle,
+  timeoutMs: number,
+  taskId: string
+): Promise<string> {
+  const startGen = watcher.getGeneration(filename);
+  const filePromise = watcher.awaitChange(filename, timeoutMs);
+  // exitPromise resolves with `number | null` (the agent's exit code, or null
+  // if killed by signal). filePromise resolves with `string` (the new content).
+  const exitPromise = agent.exited;
+  const cancelPromise = makeCancelPromise(taskId);
+
+  const winner = await Promise.race([filePromise, exitPromise, cancelPromise]);
+
+  // Cancellation — surface immediately.
+  if (isCancelled(taskId)) {
+    throw new Error("task cancelled");
+  }
+
+  // File change won the race.
+  if (typeof winner === "string") {
+    return winner;
+  }
+
+  // Agent exited. Give chokidar a short grace period to deliver the change
+  // event before we conclude the agent died without writing.
+  await sleep(POST_EXIT_GRACE_MS);
+  const endGen = watcher.getGeneration(filename);
+  if (endGen > startGen) {
+    const content = watcher.getLatestContent(filename);
+    if (content !== null) {
+      return content;
+    }
+  }
+  throw new Error(
+    `agent exited with code ${winner} before writing ${filename}`
+  );
+}
+
+/** Grace period after agent exit, in ms, before declaring the agent crashed. */
+const POST_EXIT_GRACE_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Build a promise that rejects when the task transitions to `cancelled` (or is
+ * deleted). Polls `getTask` at a coarse interval — we don't need fine-grained
+ * resolution because cancellation is a deliberate user action.
+ */
+function makeCancelPromise(taskId: string): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const tick = () => {
+      if (isCancelled(taskId)) {
+        reject(new Error("task cancelled"));
+        return;
+      }
+      setTimeout(tick, CANCEL_POLL_MS);
+    };
+    setTimeout(tick, CANCEL_POLL_MS);
+  });
+}
+
+function isCancelled(taskId: string): boolean {
+  const t = getTask(taskId);
+  return !t || t.status === "cancelled";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spawn helpers — wrap spawnAgent with the right agent role + log binding
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the Connection for a model id, if any. Returns null for built-in
+ * model ids (`provider/model-name`), since those have no user-configured
+ * routing. Returns the live Connection record for `custom:<connId>:<id>`
+ * ids so the spawner can inject the API key + write the config fragment.
+ * Returns null if the connection has been deleted since the task was
+ * created (orchestrator surfaces this as an early escalation).
+ */
+function resolveConnectionForModel(
+  model: string | undefined
+): Connection | null {
+  if (!model) return null;
+  const resolved = resolveConnectionModel(model);
+  return resolved?.connection ?? null;
+}
+
+function spawnPlanner(
+  taskId: string,
+  workdir: string,
+  prompt: string,
+  log: (a: AgentRole, s: LogLevel, t: string) => void,
+  model: string | undefined,
+  connection: Connection | null
+): AgentHandle {
+  return spawnAgent(
+    "planner",
+    taskId,
+    workdir,
+    prompt,
+    (line) => log("planner", "stdout", line),
+    (line) => log("planner", "stderr", line),
+    (code) => log("planner", "stdout", `agent exited with code ${code}`),
+    { model, connection }
+  );
+}
+
+function spawnMaker(
+  taskId: string,
+  workdir: string,
+  prompt: string,
+  log: (a: AgentRole, s: LogLevel, t: string) => void,
+  model: string | undefined,
+  connection: Connection | null
+): AgentHandle {
+  return spawnAgent(
+    "maker",
+    taskId,
+    workdir,
+    prompt,
+    (line) => log("maker", "stdout", line),
+    (line) => log("maker", "stderr", line),
+    (code) => log("maker", "stdout", `agent exited with code ${code}`),
+    { model, connection }
+  );
+}
+
+function spawnVerifier(
+  taskId: string,
+  workdir: string,
+  prompt: string,
+  log: (a: AgentRole, s: LogLevel, t: string) => void,
+  model: string | undefined,
+  connection: Connection | null
+): AgentHandle {
+  return spawnAgent(
+    "verifier",
+    taskId,
+    workdir,
+    prompt,
+    (line) => log("verifier", "stdout", line),
+    (line) => log("verifier", "stderr", line),
+    (code) => log("verifier", "stdout", `agent exited with code ${code}`),
+    { model, connection }
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prompt builders
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildPlannerPrompt(taskPrompt: string): string {
+  return [
+    `Task: ${taskPrompt}`,
+    "",
+    "Read GOAL.md (it currently contains the template at the project root), explore the codebase, and write your plan into GOAL.md. Replace the placeholder sections with your concrete plan.",
+    "When you finish, return a short summary in this format:",
+    "PLAN READY",
+    "- Steps: N",
+    "- Files to touch: <list>",
+    "- Criteria: N",
+    "- Risks: <list or \"none\">",
+    "- Notes: <any ambiguity or assumption>",
+  ].join("\n");
+}
+
+/**
+ * Prompt for re-planning after the user requested an adjustment. Includes
+ * the previous plan and the user's feedback so the planner can either
+ * adopt the feedback or push back with a reasoned counter-proposal.
+ */
+function buildAdjustPlannerPrompt(
+  taskPrompt: string,
+  adjustments: string,
+  existingGoal: string
+): string {
+  return [
+    `Task: ${taskPrompt}`,
+    "",
+    "The user reviewed your previous plan and asked for these adjustments:",
+    "```",
+    adjustments,
+    "```",
+    "",
+    "Your previous plan (GOAL.md):",
+    "```",
+    existingGoal,
+    "```",
+    "",
+    "Read the existing GOAL.md, apply the user's feedback, and rewrite the plan. If the user's feedback conflicts with what you found in the codebase, push back — note the conflict in `## Notes for the maker` so the user can decide.",
+    "When you finish, return the same summary format as the initial plan:",
+    "PLAN READY",
+    "- Steps: N",
+    "- Files to touch: <list>",
+    "- Criteria: N",
+    "- Risks: <list or \"none\">",
+    "- Notes: <any ambiguity or assumption, including any pushback on the user's feedback>",
+  ].join("\n");
+}
+
+function buildMakerPrompt(
+  attempt: number,
+  maxAttempts: number,
+  goalContent: string,
+  stateContent: string | null,
+  userFeedback: string | undefined
+): string {
+  const parts: string[] = [];
+  parts.push(`Attempt ${attempt} of ${maxAttempts}.`);
+  parts.push("");
+  parts.push("Plan (from GOAL.md):");
+  parts.push("```");
+  parts.push(goalContent);
+  parts.push("```");
+  parts.push("");
+  if (stateContent) {
+    parts.push("Current state (from STATE.md):");
+    parts.push("```");
+    parts.push(stateContent);
+    parts.push("```");
+    parts.push("");
+  }
+  if (userFeedback) {
+    parts.push("User feedback from the previous REJECT verdict:");
+    parts.push("```");
+    parts.push(userFeedback);
+    parts.push("```");
+    parts.push("");
+  }
+  parts.push(
+    "Implement the plan. Touch only the files in GOAL.md → Files to touch. " +
+      "Run the documented build and tests. Then append your diff summary to " +
+      "STATE.md under a new heading `## Diff Summary — Attempt " +
+      attempt +
+      "`."
+  );
+  return parts.join("\n");
+}
+
+function buildVerifierPrompt(
+  attempt: number,
+  goalContent: string,
+  stateContent: string
+): string {
+  return [
+    `Attempt ${attempt}.`,
+    "",
+    "Plan (from GOAL.md):",
+    "```",
+    goalContent,
+    "```",
+    "",
+    "Latest state (from STATE.md):",
+    "```",
+    stateContent,
+    "```",
+    "",
+    "Verify the diff: re-run the build and tests independently, check scope + intent + no-cheating against GOAL.md. Append your verdict to STATE.md under a new heading `## Verifier Verdict — Attempt " +
+      attempt +
+      "`.",
+  ].join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function extractAdjustments(value: unknown): string {
+  if (typeof value !== "object" || value === null) return "";
+  const adjustments = (value as { adjustments?: unknown }).adjustments;
+  return typeof adjustments === "string" ? adjustments : "";
+}
+
+function errorMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Resolve the model + connection for a particular role in one shot. The
+ * connection is looked up only after the final model id is picked, since
+ * the per-role override (if set) takes precedence over the task default —
+ * and a different model might be a different connection (or none). Returns
+ * `{ model, connection }` where `connection` is non-null only when the
+ * resolved model id belongs to a user-configured Connection.
+ */
+function resolveSpawnTarget(
+  task: Pick<Task, "model" | "modelOverrides">,
+  role: "planner" | "maker" | "verifier"
+): { model: string | undefined; connection: Connection | null } {
+  const key = modelOverrideKeyForRole(role);
+  const model = task.modelOverrides?.[key] ?? task.model;
+  const connection = model ? resolveConnectionForModel(model) : null;
+  return { model, connection };
+}
+
+/** Back-compat for any callers we haven't updated — only the model id. */
+function resolveModel(
+  defaultModel: string | undefined,
+  overrides: Task["modelOverrides"],
+  role: "planner" | "maker" | "verifier"
+): string | undefined {
+  const key = modelOverrideKeyForRole(role);
+  return overrides?.[key] ?? defaultModel ?? undefined;
+}
+
+type LogFn = (a: AgentRole, s: LogLevel, t: string) => void;
+type EmitFn = (status: TaskStatus, message?: string) => void;
+
+function escalate(
+  taskId: string,
+  reason: string,
+  log: LogFn,
+  emit: EmitFn
+): void {
+  updateTask(taskId, { escalationReason: reason });
+  emit("escalated", reason);
+  broadcaster.broadcast(taskId, { type: "escalation", taskId, reason });
+  log("orchestrator", "info", `■ ESCALATED — ${reason}`);
+}
