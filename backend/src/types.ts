@@ -82,11 +82,19 @@ export interface LogEntry {
  * Task, but `Task.projectId` / `Task.sessionId` are optional — tasks
  * without them sit in the catch-all "Unassigned" bucket so the existing
  * flow keeps working.
+ *
+ * `rootPath` is the absolute filesystem path the user picked in the New
+ * Project modal's Browse button. It's optional — projects without one
+ * have no anchored directory and tasks under them fall back to the
+ * default workdir derivation. When set, opening the project surfaces
+ * this path (e.g. in the sidebar) so the user can `cd` into the project's
+ * actual workspace.
  */
 export interface Project {
   id: string;
   name: string;
   description?: string;
+  rootPath?: string;
   createdAt: string;
   updatedAt: string;
 }

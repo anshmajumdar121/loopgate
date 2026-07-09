@@ -110,6 +110,10 @@ export interface Project {
   id: string;
   name: string;
   description?: string;
+  /** Absolute filesystem path the user picked in the New Project modal's
+   *  Browse button. When set, this is the project's workspace root —
+   *  opening the project in the sidebar surfaces it. */
+  rootPath?: string;
   createdAt: string;
   updatedAt: string;
 }

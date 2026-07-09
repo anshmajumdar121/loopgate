@@ -1,0 +1,175 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #ffffff;
+  color: #0a0a0f;
+  transition:
+    background-color 200ms ease,
+    color 200ms ease;
+}
+
+html.dark,
+html.dark body {
+  background: #09090b;
+  color: #fafafa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* React Flow theme overrides — driven by the `.dark` class on <html> */
+.react-flow {
+  --xy-background-color-default: transparent;
+  background: transparent;
+  transition: background-color 200ms ease;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}
+
+.react-flow__background {
+  background-color: transparent;
+}
+
+.react-flow__edge-path {
+  pointer-events: stroke;
+}
+
+.react-flow__handle {
+  z-index: 1;
+}
+
+/* Controls panel */
+.react-flow__controls {
+  box-shadow:
+    0 4px 12px rgba(10, 10, 15, 0.06),
+    0 1px 3px rgba(10, 10, 15, 0.04) !important;
+  border-radius: 0.5rem !important;
+  overflow: hidden;
+  border: 1px solid rgb(228 228 231);
+  background: #ffffff;
+  transition:
+    background-color 200ms ease,
+    border-color 200ms ease;
+}
+.dark .react-flow__controls {
+  border-color: rgb(39 39 42);
+  background: #18181b;
+}
+
+.react-flow__controls-button {
+  background: transparent !important;
+  border-bottom: 1px solid rgb(228 228 231) !important;
+  color: #52525b !important;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
+}
+.dark .react-flow__controls-button {
+  border-bottom-color: rgb(39 39 42) !important;
+  color: #a1a1aa !important;
+}
+.react-flow__controls-button:hover {
+  background: rgb(244 244 245) !important;
+}
+.dark .react-flow__controls-button:hover {
+  background: rgb(24 24 27) !important;
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* MiniMap */
+.react-flow__minimap {
+  background: #ffffff !important;
+  border: 1px solid rgb(228 228 231) !important;
+  border-radius: 0.5rem !important;
+  box-shadow:
+    0 4px 12px rgba(10, 10, 15, 0.06),
+    0 1px 3px rgba(10, 10, 15, 0.04);
+  transition:
+    background-color 200ms ease,
+    border-color 200ms ease;
+}
+.dark .react-flow__minimap {
+  background: #18181b !important;
+  border-color: rgb(39 39 42) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(250, 250, 250, 0.7);
+  transition: fill 200ms ease;
+}
+.dark .react-flow__minimap-mask {
+  fill: rgba(9, 9, 11, 0.7);
+}
+
+/* React Flow viewport transition */
+.react-flow__viewport {
+  transition: transform 200ms ease-out;
+}
+
+/* Subtle entrance for nodes — fade + tiny rise, no scale (scale
+   fights with the icon-circle + pill composition). */
+@keyframes node-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.react-flow__node {
+  animation: node-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Smooth the wire transitions when their tone or active state changes */
+.react-flow__edge-path {
+  transition:
+    stroke 200ms ease,
+    stroke-width 200ms ease;
+}

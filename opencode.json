@@ -1,0 +1,66 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "loop-orchestrator": {
+      "description": "Drives the task loop: plan → implement → verify. Reads GOAL.md + STATE.md, dispatches to subagents, decides retry vs escalate.",
+      "mode": "primary",
+      "model": "opencode-go/minimax-m3",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "task": {
+          "*": "deny",
+          "loop-planner": "allow",
+          "loop-maker": "allow",
+          "loop-verifier": "allow"
+        }
+      },
+      "prompt": "{file:.opencode/agents/loop-orchestrator.md}"
+    },
+    "loop-planner": {
+      "description": "Read-only codebase exploration + implementation planning. Never edits code.",
+      "mode": "subagent",
+      "model": "opencode-go/minimax-m3",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "ask",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "ls*": "allow",
+          "cat*": "allow",
+          "npm test*": "allow",
+          "npm run build*": "allow"
+        }
+      },
+      "prompt": "{file:.opencode/agents/loop-planner.md}"
+    },
+    "loop-maker": {
+      "description": "Implements the plan from GOAL.md. Edits code, runs tests, writes diff summary. Never marks own work done.",
+      "mode": "subagent",
+      "model": "opencode-go/minimax-m3",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow"
+      },
+      "prompt": "{file:.opencode/agents/loop-maker.md}"
+    },
+    "loop-verifier": {
+      "description": "Checks the maker's diff against GOAL.md criteria + tests. APPROVE or REJECT only. Never edits code.",
+      "mode": "subagent",
+      "model": "opencode-go/minimax-m3",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "ask",
+          "git diff*": "allow",
+          "npm test*": "allow",
+          "npm run build*": "allow",
+          "npx vitest*": "allow",
+          "npx tsc*": "allow"
+        }
+      },
+      "prompt": "{file:.opencode/agents/loop-verifier.md}"
+    }
+  }
+}

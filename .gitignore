@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/cache
+.yarn/install-state.gz
+
+# Build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+.next/
+.nuxt/
+.vite/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Coverage / cache
+coverage/
+.nyc_output/
+.cache/
+.parcel-cache/
+.eslintcache
+.turbo/
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Runtime data (project-specific)
+backend/data/
+*.sqlite
+*.db
+
+# OS / temp
+*.swp
+*.swo
+*.tmp
+*~
+.dtps
