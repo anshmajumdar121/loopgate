@@ -349,6 +349,22 @@ export async function runLoop(taskId: string): Promise<void> {
     ACTIVE_LOOPS.delete(taskId);
     return;
   }
+  // Fresh-run hygiene: a brand-new planning run must not inherit the
+  // previous task's Diff Summaries / verdicts in STATE.md — they bloat
+  // and confuse the verifier prompt. Resume paths (saved plan or diff)
+  // intentionally keep STATE.md.
+  if (!initialTask.plan && !initialTask.diff && initialTask.status !== "plan_review") {
+    try {
+      const { writeFile: wf, rm } = await import("node:fs/promises");
+      await wf(
+        pathResolve(initialTask.workdir, "STATE.md"),
+        `# Loop State\n\nTask: ${initialTask.title}\nStarted: ${new Date().toISOString()}\n`,
+        "utf8"
+      );
+      await rm(pathResolve(initialTask.workdir, ".loop"), { recursive: true, force: true });
+      appendLog(taskId, "orchestrator", "info", "workdir hygiene: reset STATE.md and cleared .loop artifacts");
+    } catch { /* hygiene is best-effort */ }
+  }
   const watcher: FileWatcher = watchFiles(initialTask.workdir);
   await watcher.ready();
 
