@@ -283,8 +283,47 @@ try {
         `reasoning=${reasoning.length} chars, maxTokens=${args.maxTokens ?? "default"}) — ` +
         `likely reasoning consumed the whole token budget; not writing ${args.output}\n`
     );
+    // Still dump the raw reasoning — it's the only signal left when the
+    // assistant text is empty. Failure to dump is non-fatal.
+    try {
+      const { mkdir: mkdirA } = await import("node:fs/promises");
+      const loopDir = `${args.workdir}/.loop`;
+      await mkdirA(loopDir, { recursive: true });
+      const attemptN = process.env.LOOP_ATTEMPT ?? "1";
+      await writeFile(
+        `${loopDir}/${args.role}-attempt-${attemptN}-raw.md`,
+        [
+          `<!-- role=${args.role} attempt=${attemptN} model=${args.model} EMPTY -->`,
+          `<!-- finish=${finishReason ?? "?"} textChars=${text.length} reasoningChars=${reasoning.length} -->`,
+          "",
+          "## reasoning (text was empty):",
+          "",
+          reasoning,
+        ].join("\n"),
+        "utf8"
+      );
+    } catch { /* artifact write is best-effort */ }
     process.exit(1);
   }
+  // Artifact dump: raw response + metadata per attempt. First place to look
+  // when a phase produces an unparseable file — you see exactly what the
+  // model said before any extraction logic touched it.
+  try {
+    const { mkdir: mkdirA } = await import("node:fs/promises");
+    const loopDir = `${args.workdir}/.loop`;
+    await mkdirA(loopDir, { recursive: true });
+    const attemptN = process.env.LOOP_ATTEMPT ?? "1";
+    await writeFile(
+      `${loopDir}/${args.role}-attempt-${attemptN}-raw.md`,
+      [
+        `<!-- role=${args.role} attempt=${attemptN} model=${args.model} -->`,
+        `<!-- finish=${finishReason ?? "?"} textChars=${text.length} reasoningChars=${reasoning.length} -->`,
+        "",
+        text,
+      ].join("\n"),
+      "utf8"
+    );
+  } catch { /* artifact write is best-effort */ }
   // Emit a structured usage line for the spawner to parse + aggregate.
   // The line starts with the magic prefix `__LOOP_USAGE__:` and ends with
   // `__END__` so a parser can locate it in the stream even when the

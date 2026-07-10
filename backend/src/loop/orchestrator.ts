@@ -1452,8 +1452,12 @@ function escalate(
   log: LogFn,
   emit: EmitFn
 ): void {
-  updateTask(taskId, { escalationReason: reason });
-  emit("escalated", reason);
-  broadcaster.broadcast(taskId, { type: "escalation", taskId, reason });
-  log("orchestrator", "info", `■ ESCALATED — ${reason}`);
+  // Point the user at the per-attempt artifacts so they can see exactly
+  // what each LLM said before extraction touched it. First place to
+  // look when a phase produced an unparseable file.
+  const hinted = `${reason} — raw LLM outputs + runtime artifacts: ${getTask(taskId)?.workdir ?? "<workdir>"}/.loop/`;
+  updateTask(taskId, { escalationReason: hinted });
+  emit("escalated", hinted);
+  broadcaster.broadcast(taskId, { type: "escalation", taskId, reason: hinted });
+  log("orchestrator", "info", `■ ESCALATED — ${hinted}`);
 }
