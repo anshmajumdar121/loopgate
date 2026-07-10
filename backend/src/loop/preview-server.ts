@@ -36,11 +36,16 @@ const MIME: Record<string, string> = {
 const registry = new Map<string, string>();
 let server: Server | null = null;
 let listening: Promise<void> | null = null;
+/** Port the server actually bound to. With `LOOP_PREVIEW_PORT=0` the OS
+ *  picks; we read it back via server.address() and use it in the returned
+ *  URL (otherwise the URL would say `:0` and connect attempts would land
+ *  on `ERR_UNSAFE_PORT` in Chromium / `EADDRNOTAVAIL` in Node fetch). */
+let actualPort: number = PREVIEW_PORT;
 
 function ensureServer(): Promise<void> {
   if (listening) return listening;
   server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", `http://localhost:${PREVIEW_PORT}`);
+    const url = new URL(req.url ?? "/", `http://localhost:${actualPort}`);
     // Path shape: /t/<taskId>/<rest...>  (decodeURIComponent guards %2F tricks)
     const m = decodeURIComponent(url.pathname).match(/^\/t\/([^/]+)\/(.*)$/);
     if (!m) {
@@ -72,7 +77,11 @@ function ensureServer(): Promise<void> {
   });
   listening = new Promise<void>((resolveP, rejectP) => {
     server!.once("error", rejectP);
-    server!.listen(PREVIEW_PORT, () => resolveP());
+    server!.listen(PREVIEW_PORT, () => {
+      const addr = server!.address();
+      if (addr && typeof addr === "object") actualPort = addr.port;
+      resolveP();
+    });
   });
   return listening;
 }
@@ -81,7 +90,7 @@ function ensureServer(): Promise<void> {
 export async function registerPreview(taskId: string, workdir: string): Promise<string> {
   registry.set(taskId, pathResolve(workdir));
   await ensureServer();
-  return `http://localhost:${PREVIEW_PORT}/t/${taskId}/`;
+  return `http://localhost:${actualPort}/t/${taskId}/`;
 }
 
 /** Test/shutdown helper. */

@@ -47,15 +47,37 @@ import {
   type AgentHandle,
 } from "./agent-spawner.js";
 import { watchFiles, type FileWatcher, type WatchedFile } from "./state-sync.js";
+import { registerPreview } from "./preview-server.js";
+import { runRuntimeCheck, type RuntimeCheckResult } from "./runtime-check.js";
 import { resolveConnectionModel } from "../store/connections.js";
+import { readFile } from "node:fs/promises";
+import { resolve as pathResolve } from "node:path";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tunables
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Per-phase timeout. Real agent runs can take a few minutes; the orchestrator
- *  escalates if any phase doesn't produce its file in time. */
-const PHASE_TIMEOUT_MS = Number(process.env.LOOP_PHASE_TIMEOUT_MS || 5 * 60_000);
+ *  escalates if any phase doesn't produce its file in time.
+ *
+ *  Observed latency on the current bridge-runner model (GLM-5.2 via the
+ *  NVIDIA relay) ranges 150-300s+ for the planner role alone — with a 5min
+ *  ceiling, any run that lands past it gets killed via watcher.stop() +
+ *  killAgent() in runLoop's finally block just as (or just before) the
+ *  agent's writeFile lands on disk, so chokidar never gets a chance to fire.
+ *  That looked like a broken file watcher but was actually a too-tight
+ *  timeout racing real LLM response time. 10min gives real headroom above
+ *  the observed ceiling. */
+const PHASE_TIMEOUT_MS = Number(process.env.LOOP_PHASE_TIMEOUT_MS || 20 * 60_000);
+
+/** Maker-specific timeout. The maker's output budget (8192 tokens — a full
+ *  self-contained index.html) is ~4× the planner/verifier's, and the provider
+ *  throttles the same model at roughly constant tokens-per-second, so its
+ *  wall-clock cost scales accordingly: with the planner observed at 4-5 min,
+ *  the maker overran the shared 10min ceiling with nothing on disk (the LLM
+ *  call was still in flight when killAgent() fired). 25min = observed planner
+ *  worst case × 4 (output scaling) + margin. */
+const MAKER_TIMEOUT_MS = Number(process.env.LOOP_MAKER_TIMEOUT_MS || 25 * 60_000);
 
 /** Maximum number of times the user can request "Adjust & Re-plan" before
  *  we escalate. Beyond this, ping-ponging on the plan usually means the
@@ -328,6 +350,7 @@ export async function runLoop(taskId: string): Promise<void> {
     return;
   }
   const watcher: FileWatcher = watchFiles(initialTask.workdir);
+  await watcher.ready();
 
   // ─── Validate custom-connection model picks ───────────────────────────
   // If the task's default model OR any per-role override references a
@@ -587,7 +610,7 @@ try {
           watcher,
           "STATE.md",
           maker,
-          PHASE_TIMEOUT_MS,
+          MAKER_TIMEOUT_MS,
           taskId
         );
       } catch (err) {
@@ -642,6 +665,29 @@ try {
         `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
       );
 
+      // ─── Runtime check: serve the workdir and actually RUN the prototype.
+      // The verifier gets this evidence verbatim; a broken page can no
+      // longer be APPROVEd on source-reading alone. `runtime` is reused
+      // below by the verifier-prompt builder and the REJECT-feedback path.
+      let runtime: RuntimeCheckResult | null = null;
+      try {
+        const previewUrl = await registerPreview(taskId, initialTask.workdir);
+        updateTask(taskId, { previewUrl });
+        const t2 = getTask(taskId);
+        if (t2) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t2 });
+        log("orchestrator", "info", `▶ RUNTIME CHECK — loading ${previewUrl} in headless chromium`);
+        runtime = await runRuntimeCheck(previewUrl, initialTask.workdir, attempt);
+        log(
+          "orchestrator",
+          runtime.ok ? "info" : "stderr",
+          runtime.ok
+            ? `✓ RUNTIME CHECK — no errors (${runtime.interactionLog.length} interactions)`
+            : `✗ RUNTIME CHECK — ${runtime.pageErrors.length} page errors, ${runtime.consoleErrors.length} console errors (screenshot: ${runtime.screenshotPath})`
+        );
+      } catch (err) {
+        log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — verifier will judge from source only`);
+      }
+
       // Bail if the user stopped us between implement and verify.
       if (bailIfCancelled(taskId, log, "before verification")) return;
 
@@ -650,10 +696,13 @@ try {
       log("verifier", "info", `▶ VERIFY attempt ${attempt}`);
       nodeStatus("verifier", "running");
 
-      const verifierPrompt = buildVerifierPrompt(
+      const verifierPrompt = await buildVerifierPrompt(
         attempt,
         latestGoal,
-        stateAfterMake
+        stateAfterMake,
+        initialTask.workdir,
+        diff,
+        runtime?.evidenceMarkdown ?? null
       );
       const verifierTarget = resolveSpawnTarget(task, "verifier");
       const verifier = spawnVerifier(
@@ -727,6 +776,14 @@ try {
 
       // ─── Phase 4: DECIDE ─────────────────────────────────────────────
       if (verdict.outcome === "APPROVE") {
+        // Register a preview in case the runtime check didn't run (e.g.
+        // resume path that jumped straight to verifying).
+        if (!getTask(taskId)?.previewUrl) {
+          try {
+            const previewUrl = await registerPreview(taskId, initialTask.workdir);
+            updateTask(taskId, { previewUrl });
+          } catch { /* preview is best-effort */ }
+        }
         emit("done", "Verifier APPROVE — loop complete");
         broadcaster.broadcast(taskId, {
           type: "done",
@@ -749,7 +806,19 @@ try {
         return;
       }
 
-      // REJECT — block for user feedback before the next attempt
+      // REJECT — block for user feedback before the next attempt.
+      // Runtime errors are the highest-signal feedback there is — always
+      // carry them into the next maker attempt, merged with any user text.
+      if (runtime && !runtime.ok) {
+        const auto = [
+          "AUTOMATED RUNTIME FEEDBACK (headless browser, previous attempt):",
+          ...runtime.pageErrors.map((e) => `- uncaught: ${e}`),
+          ...runtime.consoleErrors.map((e) => `- console.error: ${e}`),
+          "Fix these errors first.",
+        ].join("\n");
+        const existing = LAST_FEEDBACK.get(taskId);
+        LAST_FEEDBACK.set(taskId, existing ? `${existing}\n\n${auto}` : auto);
+      }
       nodeStatus("verdict", "waiting");
       log(
         "orchestrator",
@@ -823,13 +892,13 @@ try {
  *   - Task cancellation while waiting
  *
  * Why the grace period: chokidar's fsevent on macOS can lag the fs write by
- * 100–300ms, and readFile adds another few ms. The mock agent writes the file
- * then immediately calls deliverExit (after a 100ms streamDone sleep). Without
- * the grace period, exitPromise can win the race at ~t=1000ms even though the
- * watcher would have observed the change at ~t=920ms if given another beat.
- * We give the watcher 500ms after agent exit before declaring failure — long
- * enough for chokidar + readFile, short enough that a real crash escalates
- * within a second of the agent actually dying.
+ * 100–300ms, the watcher's awaitWriteFinish stability check adds another
+ * ~250–350ms on top, and readFile adds a few ms. The bridge agents write
+ * their output and exit within ~10ms, so exitPromise reliably wins the race
+ * and this grace path is the normal path for them. We give the watcher
+ * 1500ms after agent exit before declaring failure — long enough for
+ * fsevents + stability polling + readFile, short enough that a real crash
+ * escalates within a couple of seconds of the agent actually dying.
  */
 async function awaitPhaseOutput(
   watcher: FileWatcher,
@@ -863,7 +932,11 @@ async function awaitPhaseOutput(
   const endGen = watcher.getGeneration(filename);
   if (endGen > startGen) {
     const content = watcher.getLatestContent(filename);
-    if (content !== null) {
+    // Empty content is never a valid phase output (GOAL.md carries a plan,
+    // STATE.md is scaffolded before any append) — treat it the same as "no
+    // write" so the run escalates loudly instead of parsing an empty plan
+    // into "0 steps, 0 files".
+    if (content !== null && content.length > 0) {
       return content;
     }
   }
@@ -873,7 +946,7 @@ async function awaitPhaseOutput(
 }
 
 /** Grace period after agent exit, in ms, before declaring the agent crashed. */
-const POST_EXIT_GRACE_MS = 500;
+const POST_EXIT_GRACE_MS = 1500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -1074,27 +1147,143 @@ function buildMakerPrompt(
   return parts.join("\n");
 }
 
-function buildVerifierPrompt(
+/**
+ * Cap on per-file content included in the verifier prompt. The full task
+ * context (goal + constraints + diff file contents + maker summary) needs to
+ * fit in the LLM's input window; 50KB per file keeps a single-file tic-tac-toe
+ * game well under the cap and prevents a large accidental commit from blowing
+ * the prompt. Files larger than the cap are truncated with a clear marker.
+ */
+const VERIFIER_FILE_CONTENT_CAP_BYTES = 50_000;
+
+/**
+ * Resolve the orchestrator's loop-constraints.md (binding rules every agent
+ * must follow). The file lives in the Loop Agent project root, not in the
+ * task workdir — the backend's CWD when started by `npm run dev` / `node dist`
+ * is the backend directory, so the constraints are one level up. We resolve
+ * via process.cwd() to match the rest of the backend (e.g. llm-agent.mjs
+ * default path uses the same convention).
+ */
+async function readLoopConstraints(): Promise<string> {
+  const candidates = [
+    pathResolve(process.cwd(), "../loop-constraints.md"),
+    pathResolve(process.cwd(), "loop-constraints.md"),
+  ];
+  for (const p of candidates) {
+    try {
+      return await readFile(p, "utf8");
+    } catch {
+      /* try next */
+    }
+  }
+  return "(loop-constraints.md not found — verification is unconstrained)";
+}
+
+/**
+ * Read each file in the diff's `filesChanged` list so the verifier LLM has
+ * the actual content in its prompt (it has no tool access in the bridge
+ * runner). Files are read from the workdir; if a file is unreadable we
+ * surface the error as the content so the verifier can flag it rather than
+ * silently rubber-stamping.
+ */
+async function readDiffFileContents(
+  workdir: string,
+  paths: string[]
+): Promise<string> {
+  if (paths.length === 0) return "(diff.filesChanged is empty — nothing to inspect)";
+  const blocks: string[] = [];
+  for (const rel of paths) {
+    const full = pathResolve(workdir, rel);
+    let content: string;
+    let truncated = false;
+    try {
+      const buf = await readFile(full, "utf8");
+      if (buf.length > VERIFIER_FILE_CONTENT_CAP_BYTES) {
+        content = buf.slice(0, VERIFIER_FILE_CONTENT_CAP_BYTES);
+        truncated = true;
+      } else {
+        content = buf;
+      }
+    } catch (err) {
+      content = `<unreadable: ${err instanceof Error ? err.message : String(err)}>`;
+    }
+    const tail = truncated
+      ? `\n\n[... truncated at ${VERIFIER_FILE_CONTENT_CAP_BYTES} bytes; full file is longer]`
+      : "";
+    blocks.push(`### ${rel}\n\n\`\`\`\n${content}${tail}\n\`\`\``);
+  }
+  return blocks.join("\n\n");
+}
+
+/**
+ * Build the verifier's user prompt. The verifier LLM runs in the bridge
+ * runner with no read_file / bash / build tools, so we pre-load everything
+ * it needs into the prompt itself:
+ *   1. The plan (GOAL.md) — task, criteria, file allowlist/denylist
+ *   2. The binding constraints (loop-constraints.md) — denylist, max retries
+ *   3. The maker's diff summary (latest STATE.md after the maker ran)
+ *   4. The actual contents of every file in diff.filesChanged
+ *
+ * The verifier's system prompt (in llm-agent.mjs) tells it the bridge has
+ * done this; we make it true here. Without this, the verifier was producing
+ * confused REJECTs complaining about missing context.
+ */
+async function buildVerifierPrompt(
   attempt: number,
   goalContent: string,
-  stateContent: string
-): string {
+  stateContent: string,
+  workdir: string,
+  diff: { filesChanged: { path: string }[] } | null,
+  runtimeEvidence: string | null = null
+): Promise<string> {
+  const constraints = await readLoopConstraints();
+  const diffFiles = await readDiffFileContents(
+    workdir,
+    (diff?.filesChanged ?? []).map((f) => f.path)
+  );
+
   return [
     `Attempt ${attempt}.`,
     "",
-    "Plan (from GOAL.md):",
-    "```",
+    "=== GOAL.md (plan + criteria + allowlist) ===",
+    "",
     goalContent,
-    "```",
     "",
-    "Latest state (from STATE.md):",
-    "```",
+    "=== loop-constraints.md (binding rules) ===",
+    "",
+    constraints,
+    "",
+    "=== STATE.md (maker's diff summary, latest state) ===",
+    "",
     stateContent,
-    "```",
     "",
-    "Verify the diff: re-run the build and tests independently, check scope + intent + no-cheating against GOAL.md. Append your verdict to STATE.md under a new heading `## Verifier Verdict — Attempt " +
-      attempt +
-      "`.",
+    "=== Diff file contents (from diff.filesChanged in STATE.md) ===",
+    "",
+    diffFiles,
+    "",
+    "=== Runtime check (headless browser ACTUALLY executed the prototype) ===",
+    "",
+    runtimeEvidence ??
+      "Runtime check unavailable this attempt — judge from source, and say so in your verdict.",
+    "",
+    "=== Your task ===",
+    "",
+    "Walk the completion criteria in GOAL.md one by one. Check scope (every",
+    "changed file is in the allowlist, no denylist hits), intent (the diff",
+    "addresses the task), tests/build (or for vanilla deliverables: that the",
+    "file is well-formed), and no-cheating (no skipped tests, no swallowed",
+    "errors, no type-suppression hacks).",
+    "",
+    "RUNTIME EVIDENCE IS AUTHORITATIVE: if the runtime check section above",
+    "shows ANY uncaught page error or console error, you MUST return REJECT",
+    "and quote the exact error text in Required fixes — regardless of how",
+    "correct the source looks. If the runtime check shows no errors, weigh",
+    "that as strong evidence the prototype loads and basic interactions work.",
+    "",
+    `Append your verdict to STATE.md under a new heading \`## Verifier Verdict — Attempt ${attempt}\`.`,
+    "Follow the format your system prompt specifies. The bridge will append",
+    "your reply to STATE.md without modification — do not include prose",
+    "before or after the verdict block.",
   ].join("\n");
 }
 

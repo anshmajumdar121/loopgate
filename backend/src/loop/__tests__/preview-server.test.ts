@@ -2,7 +2,16 @@ import { describe, it, expect, afterAll } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerPreview, stopPreviewServer } from "../preview-server.js";
+
+// Vitest runs each test file in its own worker; sibling test files (e.g.
+// runtime-check.test.ts) also bind the preview server. Set port 0 so the
+// OS picks a free one — no env-var juggling between files. Env must be
+// set BEFORE the dynamic import because preview-server.ts reads it at
+// module load.
+process.env.LOOP_PREVIEW_PORT = "0";
+const { registerPreview, stopPreviewServer } = await import(
+  "../preview-server.js"
+);
 
 describe("preview-server", () => {
   afterAll(() => stopPreviewServer());
