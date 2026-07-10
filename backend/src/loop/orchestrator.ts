@@ -31,6 +31,7 @@ import { broadcaster } from "../ws/broadcaster.js";
 import type {
   AgentRole,
   Connection,
+  DiffSummary,
   LogLevel,
   PlanSummary,
   Task,
@@ -408,11 +409,17 @@ export async function runLoop(taskId: string): Promise<void> {
 
 try {
     // ─── Resume-skip: if the task already has a saved plan (came in via
-    // /resume with status="plan_review"), skip Phase 1 entirely and start
-    // the maker. The user explicitly wanted to continue from where they
-    // stopped — re-running the planner would discard their prior approval.
+    // /resume with status="plan_review" OR "verifying"), skip Phase 1
+    // entirely. The user explicitly wanted to continue from where they
+    // stopped — re-running the planner would discard their prior
+    // approval. The "verifying" case matters: a task that escalated
+    // mid-verify resumes with status="verifying" (from resumeLoop) and
+    // a saved plan; without this branch, the planner would re-run and
+    // overwrite the saved diff downstream.
     const skipPlanning =
-      initialTask.status === "plan_review" && Boolean(initialTask.plan);
+      (initialTask.status === "plan_review" ||
+        initialTask.status === "verifying") &&
+      Boolean(initialTask.plan);
     if (skipPlanning) {
       log(
         "orchestrator",
@@ -425,6 +432,20 @@ try {
         "Resumed with saved plan — skipping re-plan"
       );
     }
+    // Parallel skip for Phase 2: a task that already reached the
+    // verify phase (status="verifying" on resume, with both plan and
+    // diff saved) should jump straight to the verifier — re-running
+    // the maker would overwrite the saved diff and re-do work the
+    // user already paid for. This is the missing half of the resume
+    // machinery: skipPlanning handles the planner→implementer case;
+    // skipImplementation handles the implementer→verifier case.
+    let skipImplementation =
+      initialTask.status === "verifying" &&
+      Boolean(initialTask.plan) &&
+      Boolean(initialTask.diff);
+    // ponytail: `let` not `const` — the implementation block flips it to
+    // false after consuming the skip (so a 2nd-iteration resume doesn't
+    // re-skip).
 
     // ─── Phase 1: PLAN (with confirm/adjust loop) ────────────────────────
     // The planner agent runs once for the initial plan, then re-runs on
@@ -616,113 +637,146 @@ try {
       // while the previous phase was winding down.
       if (bailIfCancelled(taskId, log, "before implementation")) return;
 
-      // ─── Phase 2: IMPLEMENT ──────────────────────────────────────────
-      emit("implementing", `Attempt ${attempt}: dispatching loop-maker`);
-      log("maker", "info", `▶ IMPLEMENT attempt ${attempt}`);
-      nodeStatus("maker", "running");
-
-      const latestGoal = watcher.getLatestContent("GOAL.md") ?? currentGoalContent;
-      const latestState = watcher.getLatestContent("STATE.md");
-      const feedback = LAST_FEEDBACK.get(taskId);
-      const makerPrompt = buildMakerPrompt(
-        attempt,
-        task.maxAttempts,
-        latestGoal,
-        latestState,
-        feedback
-      ) + (await readTaskContextFiles(initialTask));
-      const makerTarget = resolveSpawnTarget(task, "maker");
-      const maker = spawnMaker(
-        taskId,
-        task.workdir,
-        makerPrompt,
-        log,
-        makerTarget.model,
-        makerTarget.connection
-      );
-
-      let stateAfterMake: string;
-      try {
-        stateAfterMake = await awaitPhaseOutput(
-          watcher,
-          "STATE.md",
-          maker,
-          MAKER_TIMEOUT_MS,
-          taskId
-        );
-      } catch (err) {
-        if (isCancelled(taskId)) {
-          // stopLoop already set status + broadcast — nothing more to do.
-          return;
-        }
-        log("maker", "stderr", `✗ IMPLEMENT FAILED — ${errorMsg(err)}`);
-        nodeStatus("maker", "error");
-        escalate(
-          taskId,
-          `Maker failed on attempt ${attempt}: ${errorMsg(err)}`,
-          log,
-          emit
-        );
-        return;
-      }
-
-      const { diff } = parseStateDiff(stateAfterMake);
-      if (!diff) {
-        log(
-          "maker",
-          "stderr",
-          "✗ maker wrote STATE.md but no Diff Summary section was found"
-        );
-        nodeStatus("maker", "error");
-        escalate(
-          taskId,
-          `Maker output on attempt ${attempt} had no Diff Summary section`,
-          log,
-          emit
-        );
-        return;
-      }
-
-      updateTask(taskId, { diff });
-      appendHistory(
-        taskId,
-        "implementing",
-        `Diff: ${diff.filesChanged.length} files, build exit ${diff.buildExit}, tests ${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`
-      );
-      broadcaster.broadcast(taskId, { type: "diff_ready", taskId, diff });
-      nodeStatus("maker", "success");
-      broadcaster.broadcast(taskId, {
-        type: "task_update",
-        taskId,
-        task: getTask(taskId)!,
-      });
-      log(
-        "maker",
-        "stdout",
-        `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
-      );
-
-      // ─── Runtime check: serve the workdir and actually RUN the prototype.
-      // The verifier gets this evidence verbatim; a broken page can no
-      // longer be APPROVEd on source-reading alone. `runtime` is reused
-      // below by the verifier-prompt builder and the REJECT-feedback path.
+      // These four are filled in by either the implementation block
+      // below or by the resume-skip branch — Phase 3 (verify) reads
+      // them in either case.
+      let stateAfterMake = "";
+      let diff: DiffSummary | null = null;
       let runtime: RuntimeCheckResult | null = null;
-      try {
-        const previewUrl = await registerPreview(taskId, initialTask.workdir);
-        updateTask(taskId, { previewUrl });
-        const t2 = getTask(taskId);
-        if (t2) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t2 });
-        log("orchestrator", "info", `▶ RUNTIME CHECK — loading ${previewUrl} in headless chromium`);
-        runtime = await runRuntimeCheck(previewUrl, initialTask.workdir, attempt);
+      // Read once at the top of the iteration; the maker block uses it
+      // and the verifier block uses it, so it can't be local to the
+      // else branch.
+      const latestGoal = watcher.getLatestContent("GOAL.md") ?? currentGoalContent;
+
+      // ─── Phase 2: IMPLEMENT (or skip on resume-with-saved-diff) ─────
+      // When a task escalates mid-verify, resumeLoop preserves plan +
+      // diff and sets status="verifying". Without this branch, runLoop
+      // would re-enter Phase 1 and overwrite the saved plan/diff — the
+      // observed "resume lost everything" bug. The skip path reuses
+      // the existing STATE.md and diff; the runtime check is NOT re-run
+      // (its evidence is still in <workdir>/.loop/ if the verifier needs
+      // to cross-reference, and re-running on resume is wasteful when
+      // no files have changed).
+      if (skipImplementation) {
+        skipImplementation = false;
         log(
           "orchestrator",
-          runtime.ok ? "info" : "stderr",
-          runtime.ok
-            ? `✓ RUNTIME CHECK — no errors (${runtime.interactionLog.length} interactions)`
-            : `✗ RUNTIME CHECK — ${runtime.pageErrors.length} page errors, ${runtime.consoleErrors.length} console errors (screenshot: ${runtime.screenshotPath})`
+          "info",
+          `▶ RESUME — skipping implementation, reusing saved diff (${task.diff!.filesChanged.length} files)`
         );
-      } catch (err) {
-        log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — verifier will judge from source only`);
+        appendHistory(
+          taskId,
+          "verifying",
+          "Resumed with saved diff — skipping re-implementation"
+        );
+        stateAfterMake = watcher.getLatestContent("STATE.md") ?? "";
+        diff = task.diff ?? null;
+      } else {
+        emit("implementing", `Attempt ${attempt}: dispatching loop-maker`);
+        log("maker", "info", `▶ IMPLEMENT attempt ${attempt}`);
+        nodeStatus("maker", "running");
+
+        const latestState = watcher.getLatestContent("STATE.md");
+        const feedback = LAST_FEEDBACK.get(taskId);
+        const makerPrompt = buildMakerPrompt(
+          attempt,
+          task.maxAttempts,
+          latestGoal,
+          latestState,
+          feedback
+        ) + (await readTaskContextFiles(initialTask));
+        const makerTarget = resolveSpawnTarget(task, "maker");
+        const maker = spawnMaker(
+          taskId,
+          task.workdir,
+          makerPrompt,
+          log,
+          makerTarget.model,
+          makerTarget.connection
+        );
+
+        try {
+          stateAfterMake = await awaitPhaseOutput(
+            watcher,
+            "STATE.md",
+            maker,
+            MAKER_TIMEOUT_MS,
+            taskId
+          );
+        } catch (err) {
+          if (isCancelled(taskId)) {
+            // stopLoop already set status + broadcast — nothing more to do.
+            return;
+          }
+          log("maker", "stderr", `✗ IMPLEMENT FAILED — ${errorMsg(err)}`);
+          nodeStatus("maker", "error");
+          escalate(
+            taskId,
+            `Maker failed on attempt ${attempt}: ${errorMsg(err)}`,
+            log,
+            emit
+          );
+          return;
+        }
+
+        const parsed = parseStateDiff(stateAfterMake);
+        if (!parsed.diff) {
+          log(
+            "maker",
+            "stderr",
+            "✗ maker wrote STATE.md but no Diff Summary section was found"
+          );
+          nodeStatus("maker", "error");
+          escalate(
+            taskId,
+            `Maker output on attempt ${attempt} had no Diff Summary section`,
+            log,
+            emit
+          );
+          return;
+        }
+        diff = parsed.diff;
+
+        updateTask(taskId, { diff });
+        appendHistory(
+          taskId,
+          "implementing",
+          `Diff: ${diff.filesChanged.length} files, build exit ${diff.buildExit}, tests ${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`
+        );
+        broadcaster.broadcast(taskId, { type: "diff_ready", taskId, diff });
+        nodeStatus("maker", "success");
+        broadcaster.broadcast(taskId, {
+          type: "task_update",
+          taskId,
+          task: getTask(taskId)!,
+        });
+        log(
+          "maker",
+          "stdout",
+          `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
+        );
+
+        // ─── Runtime check: serve the workdir and actually RUN the prototype.
+        // The verifier gets this evidence verbatim; a broken page can no
+        // longer be APPROVEd on source-reading alone. `runtime` is reused
+        // below by the verifier-prompt builder and the REJECT-feedback path.
+        try {
+          const previewUrl = await registerPreview(taskId, initialTask.workdir);
+          updateTask(taskId, { previewUrl });
+          const t2 = getTask(taskId);
+          if (t2) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t2 });
+          log("orchestrator", "info", `▶ RUNTIME CHECK — loading ${previewUrl} in headless chromium`);
+          runtime = await runRuntimeCheck(previewUrl, initialTask.workdir, attempt);
+          log(
+            "orchestrator",
+            runtime.ok ? "info" : "stderr",
+            runtime.ok
+              ? `✓ RUNTIME CHECK — no errors (${runtime.interactionLog.length} interactions)`
+              : `✗ RUNTIME CHECK — ${runtime.pageErrors.length} page errors, ${runtime.consoleErrors.length} console errors (screenshot: ${runtime.screenshotPath})`
+          );
+        } catch (err) {
+          log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — verifier will judge from source only`);
+        }
       }
 
       // Bail if the user stopped us between implement and verify.
