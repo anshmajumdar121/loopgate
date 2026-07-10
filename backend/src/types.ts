@@ -141,6 +141,10 @@ export interface Task {
   logs: LogEntry[];
   agentPid?: number;
   escalationReason?: string;
+  /** Live static preview of the workdir (set once the maker has produced
+   *  output). Served by loop/preview-server.ts. Optional + additive so
+   *  previously persisted tasks keep loading. */
+  previewUrl?: string;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
