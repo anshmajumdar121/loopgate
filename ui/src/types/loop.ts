@@ -93,6 +93,10 @@ export interface Task {
   logs: LogEntry[];
   agentPid?: number;
   escalationReason?: string;
+  /** Live static preview of the workdir (set once the maker has produced
+   *  output). Served by the backend's preview-server. Optional + additive
+   *  so previously persisted tasks keep loading. */
+  previewUrl?: string;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
@@ -352,3 +356,67 @@ export const MODEL_OPTIONS: ModelOption[] = [
 ];
 
 export const DEFAULT_MODEL_ID = "opencode-go/minimax-m3";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token usage — aggregated counters per model, populated by the backend
+// agent spawner as LLM calls complete. The UI reads this through
+// `useTokenUsage` (see lib/useTokenUsage.ts) and shows totals / per-model
+// rows in the Connections panel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface TokenUsageEntry {
+  /** Picker-facing model id (`custom:<connId>:<upstreamId>` or
+   *  `provider/model-name`). Stable across restarts. */
+  modelId: string;
+  /** Friendly upstream model id (e.g. `minimax/minimax-m3`). */
+  upstreamModel: string;
+  /** Connection id this model belongs to, or null for curated entries. */
+  connectionId: string | null;
+  /** Connection name for display, or null for curated entries. */
+  connectionName: string | null;
+  /** Connection baseUrl for display, or null for curated entries. */
+  baseUrl: string | null;
+  /** Cumulative prompt (input) tokens. */
+  promptTokens: number;
+  /** Cumulative completion (output) tokens. */
+  completionTokens: number;
+  /** Cumulative total tokens. = prompt + completion. */
+  totalTokens: number;
+  /** Number of LLM calls captured for this model. */
+  callCount: number;
+  /** Last time usage was recorded (ISO timestamp). */
+  lastUsed: string;
+}
+
+export interface TokenUsageTotals {
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  callCount: number;
+  modelCount: number;
+}
+
+export interface TokenUsageSnapshot {
+  entries: TokenUsageEntry[];
+  totals: TokenUsageTotals;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connection test — result of POST /api/connections/:id/test
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ConnectionTestStatus =
+  | "connected"
+  | "failed"
+  | "no_key"
+  | "unsupported";
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  status: ConnectionTestStatus;
+  message: string;
+  latencyMs?: number;
+  endpoint?: string;
+  /** ISO timestamp captured client-side when the result landed. */
+  testedAt: string;
+}

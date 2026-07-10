@@ -29,6 +29,7 @@ import type {
   TaskStatus,
   Verdict,
 } from "@/types/loop";
+import { PreviewLinkChip } from "@/components/PreviewLinkChip";
 
 interface ProgressNodeData extends Record<string, unknown> {
   spec: {
@@ -285,6 +286,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
         >
           {headerStatus}
         </span>
+        <PreviewLinkChip url={task?.previewUrl} />
       </div>
 
       {/* Step list — Image 2/3's numbered, always-expanded rows.
