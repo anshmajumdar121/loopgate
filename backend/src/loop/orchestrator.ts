@@ -474,6 +474,26 @@ try {
       if (bailIfCancelled(taskId, log, "after planner write")) return;
 
       const plan: PlanSummary = parsePlanGoal(goalContent);
+      // Plan-quality gate: a plan without completion criteria is
+      // unverifiable — the verifier would be reduced to vibes. Re-plan
+      // automatically with explicit instructions; only escalate to the user
+      // when the adjust budget runs out.
+      if (plan.criteria.length === 0 && planAdjustCount < MAX_PLAN_ADJUSTS) {
+        log(
+          "orchestrator",
+          "stderr",
+          "✗ plan has 0 completion criteria — auto re-planning with explicit format instructions"
+        );
+        currentAdjustments =
+          "Your previous plan was REJECTED automatically: it contained no " +
+          "'## Completion Criteria' section (or the section was empty). " +
+          "Re-emit the FULL GOAL.md including a '## Completion Criteria' " +
+          "section with 5-10 concrete, checkable bullet criteria " +
+          "(e.g. '- clicking cell 5 places X in the center').";
+        currentGoalContent = goalContent;
+        planAdjustCount++;
+        continue;
+      }
       updateTask(taskId, { plan });
       appendHistory(
         taskId,
