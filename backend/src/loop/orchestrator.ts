@@ -446,9 +446,10 @@ try {
       );
       nodeStatus("planner", "running");
 
-      const plannerPrompt = isReplan
+      const contextBlock = await readTaskContextFiles(initialTask);
+      const plannerPrompt = (isReplan
         ? buildAdjustPlannerPrompt(initialTask.prompt, currentAdjustments, currentGoalContent)
-        : buildPlannerPrompt(initialTask.prompt);
+        : buildPlannerPrompt(initialTask.prompt)) + contextBlock;
       const plannerTarget = resolveSpawnTarget(initialTask, "planner");
       const planner = spawnPlanner(
         taskId,
@@ -593,7 +594,7 @@ try {
         latestGoal,
         latestState,
         feedback
-      );
+      ) + (await readTaskContextFiles(initialTask));
       const makerTarget = resolveSpawnTarget(task, "maker");
       const maker = spawnMaker(
         taskId,
@@ -1058,6 +1059,29 @@ function spawnVerifier(
 // ─────────────────────────────────────────────────────────────────────────────
 // Prompt builders
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Inline the task's reference files into a prompt section. Missing files
+ *  become a one-line note instead of an error — the task should still run. */
+async function readTaskContextFiles(task: Task): Promise<string> {
+  const paths = task.contextFiles ?? [];
+  if (paths.length === 0) return "";
+  const PER_FILE_CAP = 20_000;
+  const TOTAL_CAP = 60_000;
+  let total = 0;
+  const parts: string[] = ["", "=== Reference context files (read-only, from the user's codebase) ===", ""];
+  for (const p of paths) {
+    if (total >= TOTAL_CAP) { parts.push(`(remaining files skipped — ${TOTAL_CAP} byte budget reached)`); break; }
+    try {
+      let content = await readFile(pathResolve(p), "utf8");
+      if (content.length > PER_FILE_CAP) content = content.slice(0, PER_FILE_CAP) + "\n…(truncated)";
+      total += content.length;
+      parts.push(`--- ${p} ---`, "", content, "");
+    } catch {
+      parts.push(`--- ${p} --- (could not read; proceed without it)`, "");
+    }
+  }
+  return parts.join("\n");
+}
 
 function buildPlannerPrompt(taskPrompt: string): string {
   return [

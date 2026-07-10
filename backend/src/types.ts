@@ -145,6 +145,10 @@ export interface Task {
    *  output). Served by loop/preview-server.ts. Optional + additive so
    *  previously persisted tasks keep loading. */
   previewUrl?: string;
+  /** Absolute paths of reference files whose contents are inlined into the
+   *  planner and maker prompts ("here's how the existing feature works").
+   *  Capped at 20KB/file, 60KB total at prompt-build time. */
+  contextFiles?: string[];
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
@@ -218,6 +222,10 @@ export interface CreateTaskBody {
    *  project is valid). */
   projectId?: string;
   sessionId?: string;
+  /** Absolute paths of reference files whose contents are inlined into the
+   *  planner and maker prompts ("here's how the existing feature works").
+   *  Capped at 20KB/file, 60KB total at prompt-build time. */
+  contextFiles?: string[];
 }
 
 export interface ConfirmPlanBody {

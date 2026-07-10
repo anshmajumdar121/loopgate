@@ -45,6 +45,7 @@ export function createTask(input: {
   modelOverrides?: Task["modelOverrides"];
   projectId?: string;
   sessionId?: string;
+  contextFiles?: string[];
 }): Task {
   const id = nanoid(12);
   const now = new Date().toISOString();
@@ -87,6 +88,7 @@ export function createTask(input: {
       overrides && Object.keys(overrides).length > 0 ? overrides : undefined,
     projectId,
     sessionId,
+    contextFiles: input.contextFiles,
     createdAt: now,
     updatedAt: now,
     history: [],

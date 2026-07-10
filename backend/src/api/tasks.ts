@@ -29,6 +29,7 @@ const createSchema = z.object({
     .optional(),
   projectId: z.string().optional(),
   sessionId: z.string().optional(),
+  contextFiles: z.array(z.string()).max(10).optional(),
 });
 
 const confirmSchema = z.object({
@@ -79,6 +80,7 @@ tasksApi.post("/tasks", zValidator("json", createSchema), async (c) => {
     modelOverrides: body.modelOverrides,
     projectId: body.projectId,
     sessionId: body.sessionId,
+    contextFiles: body.contextFiles,
   });
   broadcaster.broadcast(task.id, { type: "task_update", taskId: task.id, task });
   // Kick off the loop asynchronously
