@@ -30,6 +30,7 @@ import type {
   Verdict,
 } from "@/types/loop";
 import { PreviewLinkChip } from "@/components/PreviewLinkChip";
+import { RuntimeCheckPanel } from "@/components/RuntimeCheckPanel";
 
 interface ProgressNodeData extends Record<string, unknown> {
   spec: {
@@ -287,6 +288,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
           {headerStatus}
         </span>
         <PreviewLinkChip url={task?.previewUrl} />
+        <RuntimeCheckPanel task={task} />
       </div>
 
       {/* Step list — Image 2/3's numbered, always-expanded rows.
