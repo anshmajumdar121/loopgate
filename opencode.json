@@ -48,7 +48,7 @@
     "loop-verifier": {
       "description": "Checks the maker's diff against GOAL.md criteria + tests. APPROVE or REJECT only. Never edits code.",
       "mode": "subagent",
-      "model": "opencode-go/minimax-m3",
+      "model": "opencode-go/glm-5.2",
       "permission": {
         "edit": "deny",
         "bash": {

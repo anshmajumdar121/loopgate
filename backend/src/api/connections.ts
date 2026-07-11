@@ -22,6 +22,7 @@ import {
   listConnectionSummaries,
   updateConnection,
 } from "../store/connections.js";
+import { onConnectionDeleted } from "./connectionMeta.js";
 
 export const connectionsApi = new Hono();
 
@@ -102,5 +103,8 @@ connectionsApi.delete("/connections/:id", (c) => {
   const id = c.req.param("id");
   const ok = deleteConnection(id);
   if (!ok) return c.json({ error: "connection not found" }, 404);
+  // Drop persisted token-usage rows tied to this connection so the UI
+  // doesn't show stale entries for a deleted provider.
+  onConnectionDeleted(id);
   return c.json({ ok: true });
 });

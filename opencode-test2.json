@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "test-provider": {
+      "npm": "@ai-sdk/openai",
+      "options": { "baseURL": "http://example.com/v1", "apiKey": "fake-key" }
+    }
+  },
+  "agent": {
+    "build": { "prompt": "test agent prompt" }
+  }
+}

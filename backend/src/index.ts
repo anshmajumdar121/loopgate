@@ -6,6 +6,7 @@ import { tasksApi } from "./api/tasks.js";
 import { projectsApi } from "./api/projects.js";
 import { sessionsApi } from "./api/sessions.js";
 import { connectionsApi } from "./api/connections.js";
+import { connectionMetaApi } from "./api/connectionMeta.js";
 import { fsApi } from "./api/fs.js";
 import { broadcaster } from "./ws/broadcaster.js";
 import {
@@ -13,6 +14,7 @@ import {
   loadAllSessions,
   loadAllConnections,
   loadAllTasks,
+  loadAllTokenUsage,
   recoverFromRestart,
   saveTask,
   TASK_DATA_DIR,
@@ -21,6 +23,7 @@ import { loadProjectsFromDisk } from "./store/projects.js";
 import { loadSessionsFromDisk } from "./store/sessions.js";
 import { loadConnectionsFromDisk } from "./store/connections.js";
 import { loadTasksFromDisk } from "./store/tasks.js";
+import { loadUsageFromDisk } from "./store/tokenUsage.js";
 
 const app = new Hono();
 
@@ -29,6 +32,7 @@ app.route("/api", tasksApi);
 app.route("/api", projectsApi);
 app.route("/api", sessionsApi);
 app.route("/api", connectionsApi);
+app.route("/api", connectionMetaApi);
 app.route("/api", fsApi);
 
 const PORT = Number(process.env.PORT || 3001);
@@ -84,19 +88,21 @@ httpServer.listen(PORT, "0.0.0.0", async () => {
 
   // Load persisted tasks and recover from any active-state crashes.
   try {
-    const [loaded, projects, sessions, connections] = await Promise.all([
+    const [loaded, projects, sessions, connections, usage] = await Promise.all([
       loadAllTasks(),
       loadAllProjects(),
       loadAllSessions(),
       loadAllConnections(),
+      loadAllTokenUsage(),
     ]);
     const recovered = recoverFromRestart(loaded);
     loadTasksFromDisk(loaded);
     loadProjectsFromDisk(projects);
     loadSessionsFromDisk(sessions);
     loadConnectionsFromDisk(connections);
+    loadUsageFromDisk(usage);
     console.log(
-      `[loop-agent-backend] loaded ${loaded.length} task(s), ${projects.length} project(s), ${sessions.length} session(s), ${connections.length} connection(s) from disk` +
+      `[loop-agent-backend] loaded ${loaded.length} task(s), ${projects.length} project(s), ${sessions.length} session(s), ${connections.length} connection(s), ${usage.length} token-usage entry(s) from disk` +
         (recovered.length > 0
           ? ` (recovered ${recovered.length} from active state)`
           : "")

@@ -81,6 +81,7 @@ tasksApi.post("/tasks", zValidator("json", createSchema), async (c) => {
     projectId: body.projectId,
     sessionId: body.sessionId,
     contextFiles: body.contextFiles,
+    autoApprovePlan: body.autoApprovePlan,
   });
   broadcaster.broadcast(task.id, { type: "task_update", taskId: task.id, task });
   // Kick off the loop asynchronously

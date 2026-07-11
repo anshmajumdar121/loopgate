@@ -1,0 +1,121 @@
+{
+  "plan_id": "2026-07-11-loop-hardening-and-attempt-visibility",
+  "project_root": "/Users/anshmajumdar/Desktop/Loop Agent",
+  "goal": "Upgrade the Loop Agent orchestrator so that (1) every attempt is fully inspectable from the UI without opening .loop/ files manually, (2) the preview server self-heals instead of silently dying, (3) the loop detects when it is stuck-repeating instead of burning retries, and (4) a real build/syntax validation step runs before the headless-browser runtime check.",
+  "hard_constraints": {
+    "non_destructive": "ADDITIVE CHANGES ONLY. Do not delete, rename, or restructure any existing component, endpoint, WebSocket message type, state field, or file format. All existing features must keep working exactly as they do today.",
+    "must_preserve": [
+      "PreviewLinkChip green '● Live Preview' link behavior and previewUrl registration on task completion (orchestrator.ts registerPreview flow)",
+      "RuntimeCheckPanel pass/fail badge, error counts, and screenshot thumbnail",
+      "Per-criterion verdict list with hover-evidence tooltips in the verification step",
+      "Changed-file list with hover reasons in the implementation step",
+      "Context files textarea in NewTaskModal (10-file / 60KB caps)",
+      "Plan-confirmation flow with MAX_PLAN_ADJUSTS=3 and auto re-plan on 0 criteria",
+      "Resume / reset / re-prompt operations and their state preservation semantics",
+      "REJECT feedback carry-over to the next maker attempt (LAST_FEEDBACK)",
+      "Max-attempts escalation with clear reason and pointer to .loop/ artifacts",
+      "Raw per-attempt artifact dumps: planner/maker/verifier-attempt-N-raw.md, runtime-attempt-N.json, runtime-attempt-N.png",
+      "Per-role model overrides and custom connections with API key injection",
+      "Multi-file maker output extraction (file:path code fences + single html fallback)",
+      "Existing UI render-nothing-when-absent pattern: every new panel must render null when its data is missing so old tasks display unchanged"
+    ],
+    "backward_compatibility": "Old task records created before this upgrade have none of the new fields. Every new UI component and backend reader must tolerate missing fields (undefined-safe) and render/behave exactly as the current version does for those tasks.",
+    "no_scope_creep": "Do not touch auth, payments, billing, migrations, .env, or secrets paths (existing denylist stays enforced). Do not upgrade dependencies unless a task explicitly requires it."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Per-attempt timeline data model + API",
+      "priority": "highest",
+      "problem": "The why behind each attempt is buried in raw .loop/ files (maker-attempt-N-raw.md, runtime-attempt-N.json). The UI only shows aggregate state ('attempt 3 of 3', pass/fail), so debugging a multi-attempt run requires manually opening artifact files.",
+      "changes": [
+        "In backend/src/types.ts ADD a new optional field to the task record: attempts?: AttemptRecord[]. Define AttemptRecord with: attemptNumber, phase durations (makerMs, runtimeCheckMs, verifierMs), filesChanged (path + reason, reuse existing DiffFileChange), runtimeResult (consoleErrorCount, pageErrorCount, screenshotPath, passed), verifierVerdict (APPROVE | REJECT | ESCALATE_HUMAN), rejectReason (string, the verifier's stated reason), and artifactPaths (links to the existing .loop/ raw files).",
+        "In backend/src/loop/orchestrator.ts, populate one AttemptRecord per implement→verify cycle at the points where this data already exists in memory (diff parse, runtime check result, verdict parse). Do NOT change the existing STATE.md format or .loop/ artifact writes — the new records are an additional sink, not a replacement.",
+        "Broadcast the updated attempts array over the existing WebSocket task-status broadcaster on every phase transition (extend the existing payload with the new optional field; do not rename or remove any current payload fields).",
+        "ADD a small read-only HTTP endpoint (or reuse the existing task-fetch route with the new field included) so the UI can fetch attempt history for a task on load/refresh."
+      ],
+      "acceptance_criteria": [
+        "Running a task that takes 2+ attempts produces an attempts array with one complete record per attempt, verifiable via the endpoint/WS payload",
+        "STATE.md, GOAL.md, and all .loop/ artifact files are byte-format-identical in structure to before this change",
+        "A task created before this upgrade loads without errors and shows no attempts data"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Attempt drill-down panel in the UI",
+      "priority": "highest",
+      "depends_on": [1],
+      "problem": "No per-attempt drill-down exists in ProgressNode.tsx — StepDetail renders aggregate counts only.",
+      "changes": [
+        "ADD a new component ui/src/components/AttemptTimeline.tsx rendering a collapsible card per attempt: header line 'Attempt N — REJECTED/APPROVED (duration)', expanding to show files changed (reuse the existing changed-file list styling), runtime check summary (reuse RuntimeCheckPanel's badge/count visual language, do not modify RuntimeCheckPanel itself), the verifier's reject reason as readable text, and links/buttons to open the raw artifacts (maker raw output, runtime JSON, screenshot).",
+        "Mount AttemptTimeline inside ProgressNode.tsx as an ADDITIVE section below the existing StepDetail content. It must render null when task.attempts is missing or empty (follow the established PreviewLinkChip / RuntimeCheckPanel render-nothing-when-absent pattern).",
+        "Mirror the AttemptRecord type in ui/src/types/loop.ts as an optional field, matching the backend shape.",
+        "Live-update the timeline from the existing WebSocket stream so attempts appear as they complete, not only on page refresh."
+      ],
+      "acceptance_criteria": [
+        "A 3-attempt task shows 3 expandable cards, each answering: what changed, what the runtime check found, and why the verifier rejected/approved",
+        "All pre-existing UI elements (preview chip, runtime panel, criterion list, changed files, logs) render pixel-identically for tasks without attempt data",
+        "Timeline updates live during a running loop without page refresh"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Preview server health check + auto-restart",
+      "priority": "high",
+      "problem": "backend/src/loop/preview-server.ts ensureServer() starts the server once and caches the listening promise forever. If the server crashes mid-run, nothing restarts it and the user is stranded with a dead Live Preview link.",
+      "changes": [
+        "In preview-server.ts, ADD a lightweight health check (e.g., GET /healthz self-request or an 'error'/'close' listener on the server) and clear the cached listening promise when the server is detected dead, so the next ensureServer() call restarts it.",
+        "In orchestrator.ts, before emitting/broadcasting previewUrl (both the post-maker registration and the on-DONE registration for resumed tasks), verify the server is alive and restart via ensureServer() if not.",
+        "ADD an orchestrator log line ('preview server restarted') and re-broadcast the task status when a restart happens, so the UI link is never stale.",
+        "Do NOT change the URL scheme (http://localhost:3210/t/<taskId>/), the port, or the registration API signature — existing registrations must keep working."
+      ],
+      "acceptance_criteria": [
+        "Manually killing the preview server process mid-task results in an automatic restart and a still-working Live Preview link at task completion",
+        "Multiple sequential tasks continue to share one server instance exactly as today (lazy start, persistent across tasks)",
+        "No change to previewUrl values stored on existing tasks"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Stuck-loop detector (repeat-failure short-circuit)",
+      "priority": "high",
+      "depends_on": [1],
+      "problem": "If attempt N+1 produces essentially the same diff and same errors as attempt N, the loop still burns all remaining retries on identical failures before escalating.",
+      "changes": [
+        "In orchestrator.ts, after each REJECT, compare the new attempt against the previous one: same set of changed file paths AND (same verifier reject reason OR same runtime error signature). Use a simple normalized-string / hash comparison — no ML, no fuzzy matching.",
+        "On detected repeat: escalate immediately with a distinct reason string 'STUCK: attempt N repeated attempt N-1 (identical diff and errors)' instead of continuing to the next attempt. Route through the EXISTING escalate function so all current escalation behavior (state preservation, .loop/ pointer, UI surfacing, resume support) is inherited unchanged.",
+        "Record stuckDetected: true on the final AttemptRecord (from task 1) so the UI timeline can label it.",
+        "The max-3-attempts cap stays as the outer bound — this detector only short-circuits earlier, never extends the loop."
+      ],
+      "acceptance_criteria": [
+        "A forced repeat failure (same files, same error) escalates after attempt 2 instead of running attempt 3, with the STUCK reason visible in the UI",
+        "Two attempts that fail differently (different files or different errors) do NOT trigger the short-circuit and the loop proceeds normally",
+        "Escalated-as-stuck tasks can still be resumed/re-prompted exactly like any other escalated task"
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Pre-runtime build/syntax validation step",
+      "priority": "medium",
+      "depends_on": [1],
+      "problem": "The headless-browser runtime check is currently the ONLY validation; buildExit/testsPassed fields in the diff summary are mocked. A syntax error that doesn't crash the rendered page can slip through to the verifier, and a no-op diff burns a full attempt cycle.",
+      "changes": [
+        "ADD a validation step in orchestrator.ts between maker output write and the runtime check: (a) no-op guard — if the maker wrote zero files or all written files are byte-identical to the previous attempt, skip runtime+verify and immediately feed 'maker produced no effective change' back as REJECT feedback for the next attempt; (b) syntax gate — for written files, run a cheap static check (HTML: parse with a lightweight parser; JS/TS: node --check or equivalent; CSS: skip). On syntax failure, feed the exact error output back to the maker as REJECT feedback without spending the runtime-check + verifier cost.",
+        "Populate the real results into the existing buildExit-style fields in the diff summary instead of mocked values — extend meaning, do not rename the fields.",
+        "Record the validation outcome on the AttemptRecord (from task 1) as validation: { passed, errors[] } so the UI timeline shows it.",
+        "The runtime check and verifier flow stay completely unchanged for attempts that pass validation."
+      ],
+      "acceptance_criteria": [
+        "A maker output with a JS syntax error gets rejected with the exact syntax error fed to the next attempt, without invoking the headless browser or verifier",
+        "A no-op maker output is caught and rejected without a runtime check",
+        "Clean maker outputs flow through runtime check and verifier exactly as before, with real (non-mocked) build fields in the diff summary"
+      ]
+    }
+  ],
+  "execution_order": "Task 1 first (data model everything else hangs off), then 2 and 3 in parallel, then 4, then 5. One commit per task, each commit message referencing this plan_id.",
+  "global_verification": [
+    "After ALL tasks: run one end-to-end loop task from the UI (submit → plan confirm → implement → verify → DONE) and confirm every must_preserve item still works: live preview link opens, runtime panel renders, criterion verdicts show, context files inject, resume works after a forced escalation",
+    "Run one intentionally-failing task and confirm the new attempt timeline, stuck detection, and validation feedback all surface in the UI",
+    "Load a task record created before this upgrade and confirm zero rendering errors and zero behavior change"
+  ]
+}

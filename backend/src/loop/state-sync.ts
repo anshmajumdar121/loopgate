@@ -50,6 +50,18 @@ export interface FileWatcher {
   getLatestContent(filename: WatchedFile): string | null;
 
   /**
+   * Resolves once chokidar's initial directory scan has completed (its
+   * 'ready' event). Resolves immediately if already ready. Not required for
+   * correctness on the slow (real LLM) write path — a directory scan over 2
+   * files finishes in single-digit ms, and every observed write in this
+   * system lands 150s+ after the watcher starts. It guards the theoretical
+   * edge case on a near-instant writer (e.g. the mock agent fallback) where
+   * ignoreInitial could otherwise swallow a write that lands before the
+   * initial scan finishes.
+   */
+  ready(): Promise<void>;
+
+  /**
    * Monotonic per-file counter — increments on every successful file read by
    * the watcher. The orchestrator uses this to tell a NEW write apart from
    * pre-existing content. Snapshot this BEFORE awaiting, then compare to the
@@ -112,8 +124,24 @@ export function watchFiles(workdir: string): FileWatcher {
   const watcher = chokidar.watch(absoluteDir, {
     persistent: true,
     ignoreInitial: true,
-    awaitWriteFinish: false,
+    // Only fire once the file size has been stable for stabilityThreshold ms.
+    // Without this, fs.writeFile's truncate-then-write can surface as a single
+    // coalesced fsevents callback whose read catches the file at 0 bytes —
+    // `latest` then caches "" with no follow-up event to correct it, and the
+    // orchestrator parses an empty plan (the "Planner returned 0 steps,
+    // 0 files" failure). Keep the threshold well below the orchestrator's
+    // POST_EXIT_GRACE_MS so a write that lands just before agent exit is
+    // still observed within the grace window.
+    awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 50 },
     depth: 0, // only direct children of workdir
+  });
+
+  let isReady = false;
+  let readyResolvers: Array<() => void> = [];
+  watcher.on("ready", () => {
+    isReady = true;
+    for (const resolve of readyResolvers) resolve();
+    readyResolvers = [];
   });
 
   // Helpers
@@ -184,8 +212,9 @@ export function watchFiles(workdir: string): FileWatcher {
       }
       scheduleFlush(name);
     } catch (err) {
-      // File might have been deleted or unreadable mid-write — ignore.
-      // The next change event will retry.
+      process.stderr.write(
+        `[watcher] onRawChange readErr name=${name} err=${err instanceof Error ? err.message : String(err)}\n`
+      );
     }
   };
 
@@ -223,6 +252,10 @@ export function watchFiles(workdir: string): FileWatcher {
     stop() {
       for (const t of debounceTimers.values()) clearTimeout(t);
       debounceTimers.clear();
+      // Unblock any caller awaiting ready() that never got a 'ready' event
+      // (e.g. stop() called immediately after construction).
+      for (const resolve of readyResolvers) resolve();
+      readyResolvers = [];
       // Reject any pending awaits so the orchestrator unblocks and exits.
       for (const [, queue] of pending) {
         for (const evt of queue) {
@@ -278,6 +311,11 @@ export function watchFiles(workdir: string): FileWatcher {
 
     getLatestContent(filename) {
       return latest.get(filename) ?? null;
+    },
+
+    ready() {
+      if (isReady) return Promise.resolve();
+      return new Promise<void>((resolve) => readyResolvers.push(resolve));
     },
 
     /**

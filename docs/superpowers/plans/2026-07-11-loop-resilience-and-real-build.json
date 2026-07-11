@@ -1,0 +1,123 @@
+{
+  "plan_id": "2026-07-11-loop-resilience-and-real-build",
+  "project_root": "/Users/anshmajumdar/Desktop/Loop Agent",
+  "predecessor_plan": "2026-07-11-loop-hardening-and-attempt-visibility (commits 10cd456, 96d30c9, 3f15410, b4b2f7e, d57e6a3 — all LOCKED)",
+  "goal": "Close the four remaining gaps in the Loop Agent: (1) verifier/planner LLM hangs currently burn the full 20-minute timeout with no salvage or re-invoke, (2) HTML files have no pre-runtime syntax gate so malformed-but-renderable pages waste a full runtime+verify cycle, (3) prototypes that use a real build stack (Vite/npm/tests) have no build or test execution step, and (4) the whole pipeline has never been certified under a real LLM-driven end-to-end run.",
+  "hard_constraints": {
+    "non_destructive": "ADDITIVE CHANGES ONLY. Do not delete, rename, or restructure any existing component, endpoint, WebSocket message type, state field, file format, or function signature. Every existing feature must keep working exactly as it does today.",
+    "locked_do_not_modify": [
+      "The five commits from the predecessor plan are LOCKED. Do not rewrite, revert, or restructure any code they introduced. You may CALL INTO and EXTEND that code (add new optional fields to AttemptRecord, add new branches, add new helpers) but never change its existing behavior:",
+      "backend/src/types.ts — AttemptRecord interface and Task.attempts?: field: existing fields keep their names, types, and optionality; new fields must be optional",
+      "backend/src/loop/orchestrator.ts — appendAttemptRecord, isStuckRepeat, markAttemptStuck helpers, phase timing markers, validation gate wiring (~line 826), stuck-detection block (~1082), preview-restart re-registration at both callsites (~911, ~1114)",
+      "backend/src/loop/preview-server.ts — onDead self-heal handler, bindCount tracking, getPreviewServerBindCount",
+      "backend/src/loop/validation.ts — runValidation signature and its no-op guard (gate a) and JS/TS node --check gate (gate b) behavior for the extensions it already handles",
+      "ui/src/components/AttemptTimeline.tsx — render-null-when-absent guard, card structure, sort order, auto-open-last-reject behavior",
+      "ui/src/components/canvas/ProgressNode.tsx — the <AttemptTimeline task={task} /> mount (~line 293)",
+      "ui/src/types/loop.ts — mirrored AttemptRecord: same rule as backend types, new fields optional only"
+    ],
+    "must_preserve": [
+      "Everything in the predecessor plan's must_preserve list (preview chip, RuntimeCheckPanel, per-criterion verdicts, changed-file list, context files textarea, plan-confirm flow, resume/reset/re-prompt, LAST_FEEDBACK carry-over, escalation with .loop/ pointer, raw artifact dumps, per-role model overrides, multi-file maker extraction, render-nothing-when-absent pattern)",
+      "PHASE_TIMEOUT_MS (20 min) and MAKER_TIMEOUT_MS (25 min) stay as the OUTER hard bounds — new recovery logic may act earlier but never extends these",
+      "Max-attempts cap (3) and MAX_PLAN_ADJUSTS (3) unchanged",
+      "The stuck-loop detector must still fire on identical repeats; new retry logic must not mask it",
+      "42/42 existing backend tests must still pass; do not modify existing test assertions — only add new test files",
+      "Preview URL scheme http://localhost:3210/t/<taskId>/ unchanged"
+    ],
+    "backward_compatibility": "Tasks created before this plan (including tasks from the predecessor plan) have none of the new fields. All new readers and UI surfaces must be undefined-safe and render/behave identically to today for those tasks.",
+    "no_scope_creep": "Existing path denylist (auth, payments, billing, migrations, .env, secrets) stays enforced. New npm dependencies are allowed ONLY where a task explicitly permits one, and it must be a small, well-known package."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Silent-LLM watchdog: early hang detection + one salvage re-invoke for planner/verifier",
+      "priority": "highest",
+      "problem": "If the planner or verifier LLM hangs (process alive but no output streaming), the orchestrator waits the full PHASE_TIMEOUT_MS (20 min) in awaitPhaseOutput (~orchestrator.ts:1014), then escalates. No partial-output salvage, no re-invoke. One hung verifier costs 20 minutes and kills the run.",
+      "changes": [
+        "In backend/llm-agent.mjs (or the agent-spawner stdout plumbing), emit a lightweight liveness signal: track the timestamp of the last streamed token/stdout chunk per spawned agent process. Expose it to the orchestrator (e.g., the spawner returns a handle with lastActivityAt, or writes heartbeat lines the orchestrator can observe). Do not change the existing output-file protocol.",
+        "In orchestrator.ts, ADD a watchdog alongside (not replacing) the existing phase timeout: if a planner or verifier process has produced NO output activity for a configurable STALL_TIMEOUT_MS (default 4 min, env-overridable), classify the phase as STALLED early instead of waiting the full 20 min.",
+        "On first stall of a phase: kill the stalled process, log '⟳ verifier stalled (no output 4m) — re-invoking (salvage attempt 1/1)', and re-invoke the same phase ONCE with the same prompt plus a short prefix noting the previous invocation stalled. Exactly one salvage re-invoke per phase per attempt — a second stall escalates through the EXISTING escalate function with reason 'STALLED: <phase> produced no output twice'.",
+        "Partial-output salvage: before killing a stalled verifier, if the raw output captured so far contains a parseable verdict block, use it instead of re-invoking (log that salvage path). If not parseable, discard and re-invoke.",
+        "Record on the AttemptRecord (new optional fields only): stalls?: { phase, stalledAfterMs, resolution: 'partial-output' | 'reinvoke' | 'escalated' }[].",
+        "Maker phase: apply the same stall detection but NO auto re-invoke (killing a maker mid-write is riskier) — on maker stall, log the early warning and let the existing MAKER_TIMEOUT_MS behavior stand. This keeps maker semantics locked.",
+        "ADD new test file backend/src/loop/__tests__/stall-watchdog.test.ts covering: stall detected after quiet period, single re-invoke, second stall escalates, partial verdict salvage, active streaming never triggers the watchdog."
+      ],
+      "acceptance_criteria": [
+        "A simulated verifier that goes silent for > STALL_TIMEOUT_MS is killed and re-invoked within ~4 min instead of 20, and the run continues normally if the re-invoke succeeds",
+        "A verifier that stalls twice escalates with a distinct STALLED reason, resumable like any escalated task",
+        "A verifier that streams slowly but continuously is never killed by the watchdog",
+        "AttemptRecord.stalls appears in the WS payload; old tasks without it render unchanged",
+        "All 42 pre-existing tests still pass unmodified"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTML syntax gate in the validation step",
+      "priority": "high",
+      "problem": "validation.ts gate (b) covers JS/TS via node --check but deliberately skips HTML (no zero-dep parser). A malformed-but-renderable HTML file passes validation and burns a full runtime+verify cycle before feedback returns.",
+      "changes": [
+        "DEPENDENCY PERMITTED for this task only: add 'parse5' (the WHATWG-spec HTML parser, minimal transitive deps) as a backend dependency. If parse5 is unavailable/uninstallable, fall back to implementing a minimal structural checker (unclosed/mismatched non-void tags, unterminated attributes) with no dependency — do not pull in anything heavier.",
+        "In validation.ts, EXTEND gate (b) with an .html/.htm branch: parse the file and collect parse errors (parse5 onParseError hooks / error tokens). Because HTML parsing is forgiving by spec, only report ERROR-severity structural problems (mismatched/unclosed non-void tags, malformed doctype, unterminated comments/attributes) — not warnings — to avoid false-positive REJECT loops.",
+        "Keep behavior for all other extensions byte-identical: JS/TS path untouched, CSS/images still skipped, the existing 10s per-file timeout and error-string format reused.",
+        "Failure flows through the EXISTING validation-failure path (appendAttemptRecord with validation:{passed:false,errors}, LAST_FEEDBACK set, runtime+verify skipped) — no new plumbing.",
+        "ADD tests in a new file (backend/src/loop/__tests__/validation-html.test.ts): valid HTML passes, unclosed <div> tree fails with a line-numbered error, forgiving-parse quirks (unquoted attrs, implied </p>) do NOT fail, non-HTML files unaffected."
+      ],
+      "acceptance_criteria": [
+        "A maker output with structurally broken HTML is rejected pre-runtime with the exact parse error fed to the next attempt, never reaching the headless browser or verifier",
+        "Ordinary hand-written HTML with benign quirks passes the gate",
+        "JS/TS validation behavior is byte-identical to before (existing 42 tests unchanged and passing)"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Real build + test execution step for project-shaped prototypes",
+      "priority": "high",
+      "depends_on": [2],
+      "problem": "The loop only validates static files + headless-browser rendering. Once prototypes use a real stack (package.json, Vite, a test suite) there is no step that installs, builds, or runs tests — so build/test fields are only 'real' for static prototypes, and prototypes port to the user's actual editor (OpenFlowCut) with avoidable rework.",
+      "changes": [
+        "ADD new module backend/src/loop/build-runner.ts. Detection: the task workdir is 'project-shaped' iff it contains a package.json. Static workdirs (no package.json) MUST skip this step entirely and behave byte-identically to today — that is the locked default path.",
+        "For project-shaped workdirs, after the validation gate passes and BEFORE the runtime check: (1) install — run 'npm install --no-audit --no-fund' only when node_modules is missing or package.json changed since the last attempt (hash it), 10 min timeout; (2) build — run the package.json 'build' script if present, 5 min timeout; (3) test — run the 'test' script if present, 5 min timeout. Capture exit codes plus the last ~100 lines of stdout/stderr for each stage.",
+        "SAFETY: run all three stages with a scrubbed env (no API keys / secrets from the orchestrator's environment), cwd pinned inside the task workdir, and never run scripts beyond install/build/test. Never run 'start'/'dev' scripts here — serving stays the preview server's job.",
+        "On build or test failure: route through the EXISTING validation-failure path (LAST_FEEDBACK gets the failing stage + tail of its output, runtime+verify skipped, AttemptRecord appended). On success: populate the REAL exit codes into the existing buildExit-style diff-summary fields (extend meaning, never rename) and continue to the runtime check unchanged.",
+        "For project-shaped workdirs whose build emits an output dir (dist/ or the configured build outDir), register the preview against the BUILT output dir — but ONLY for project-shaped tasks; static tasks keep the exact current registration path and URL scheme.",
+        "Record on AttemptRecord (new optional field only): buildRun?: { installMs?, buildMs?, testMs?, buildExit?, testExit?, failedStage?, outputTail? }.",
+        "In ui/src/components/AttemptTimeline.tsx, ADD an optional 'Build' row inside the existing attempt card, rendered only when attempt.buildRun exists (same render-nothing-when-absent pattern; do not alter any existing rows or the card structure).",
+        "ADD tests (backend/src/loop/__tests__/build-runner.test.ts): static workdir skips everything, package.json triggers detection, failing build feeds output tail into feedback, passing build populates real exit codes, install skipped when node_modules present and package.json unchanged, env scrubbing verified."
+      ],
+      "acceptance_criteria": [
+        "A static HTML prototype task runs the pipeline byte-identically to today — no install/build/test attempted, same preview URL",
+        "A Vite-shaped prototype with a failing build gets REJECT feedback containing the real build error tail, without invoking the headless browser or verifier",
+        "A passing project-shaped prototype serves its BUILT output at the live preview link and shows a Build row with real durations/exit codes in the attempt timeline",
+        "No secrets from the orchestrator environment are visible to the child install/build/test processes",
+        "All prior tests plus the new suites pass"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Live end-to-end certification run (no code changes)",
+      "priority": "highest-after-3",
+      "depends_on": [1, 2, 3],
+      "problem": "Every feature so far (attempt timeline, stuck detector, validation gate, self-heal, and now tasks 1-3) has been verified with mocks and unit tests only. Nothing has been certified under a real LLM-driven run, so the timing markers, record appends, WS live-updates, and recovery paths are unproven under live fire.",
+      "changes": [
+        "This task changes NO source code. It is a scripted certification protocol; fixes for anything it uncovers become their own follow-up commits referencing this plan_id.",
+        "RUN A — happy path: submit a small real task from the UI (e.g., 'build a color-picker panel prototype with hue slider and hex input'). Confirm: plan appears and is confirmable; maker runs; ATTEMPT HISTORY populates LIVE over WS (not only on refresh) with real per-phase durations; runtime check renders; verifier verdict + reason appear; Live Preview link opens and shows the working prototype.",
+        "RUN B — forced failure + recovery: submit a task engineered to fail attempt 1 (e.g., completion criteria the first maker pass will miss). Confirm: REJECT reason is readable in the timeline; LAST_FEEDBACK visibly influences attempt 2's output; if attempts repeat identically the STUCK short-circuit fires with its distinct reason; the escalated task is resumable.",
+        "RUN C — resilience probes during a live run: kill the preview server process mid-run and confirm the auto-restart log + a working link at completion. If any phase stalls naturally, confirm watchdog behavior; otherwise simulate one stall (e.g., temporarily point the verifier at an unreachable model for one invocation) and confirm the salvage re-invoke path fires.",
+        "RUN D (only if task 3 landed) — project-shaped prototype: submit a task whose plan calls for a package.json + build script. Confirm install/build/test run, the Build row appears in the timeline, and the preview serves the built output.",
+        "Write results to docs/superpowers/plans/2026-07-11-e2e-certification-results.md: one section per run with pass/fail per checkpoint, screenshots or log excerpts as evidence, and a defect list (each defect: symptom, suspected file:line, severity).",
+        "KNOWN ENVIRONMENT GOTCHAS (from prior debugging — verify before blaming the code): a background/unfocused browser tab freezes requestAnimationFrame and can fake dead controls in automated checks, so keep the tab foregrounded or use the headless runner; project state wipes on reload, so don't hard-reload the UI mid-run and expect state to survive."
+      ],
+      "acceptance_criteria": [
+        "All four runs executed with the results doc committed",
+        "Every checkpoint either passes or has a filed defect with file:line and severity — no silent skips",
+        "At minimum RUN A fully green before the plan is declared complete"
+      ]
+    }
+  ],
+  "execution_order": "Task 1 first (eliminates the biggest time-waste), then 2, then 3 (depends on 2's validation plumbing), then 4 certifies everything live. One commit per code task referencing this plan_id; task 4 commits only the results doc plus any defect-fix commits.",
+  "global_verification": [
+    "42 pre-existing backend tests + all new suites pass; backend and ui tsc --noEmit both clean",
+    "A pre-upgrade task record and a predecessor-plan task record both load and render with zero errors and zero behavior change",
+    "The static-prototype pipeline is byte-identical to before this plan (no build step, same preview URL, same timings) — that is the locked default path",
+    "Every item in hard_constraints.locked_do_not_modify is untouched, confirmed by git diff review before each commit"
+  ]
+}

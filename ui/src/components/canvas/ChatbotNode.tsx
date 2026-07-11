@@ -234,6 +234,21 @@ function ChatbotNodeImpl({ data, selected }: NodeProps) {
     }
   }, [editing]);
 
+  // Auto-grow the prompt textarea up to a max height, then turn on
+  // vertical scroll. The cap (~200px ≈ 8 lines) keeps the input from
+  // dominating the node body once the user pastes a long spec; the
+  // user can still scroll inside the field to see everything.
+  // Triggered on every prompt change so it works for both typing and
+  // pre-fill (e.g. entering Edit mode with an existing task prompt).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const maxHeight = 200; // px — about 8 lines at the current font size
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [prompt, editing]);
+
   const chipLabel = currentTask?.title ?? "New task";
 
   const handleSend = async () => {
@@ -520,7 +535,7 @@ className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-das
               onKeyDown={handleKeyDown}
               onClick={(e) => e.stopPropagation()}
               placeholder="Describe what you want done. e.g. 'Show me who's using the keyword in H1, and sort by page load time descending'"
-              className="nodrag h-full w-full resize-none border-0 bg-transparent text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+              className="nodrag block w-full resize-none border-0 bg-transparent text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-100 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600"
             />
           ) : prompt.trim() ? (
             <p className="pointer-events-none text-zinc-800 dark:text-zinc-100">

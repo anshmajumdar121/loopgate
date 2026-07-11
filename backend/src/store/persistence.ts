@@ -25,6 +25,7 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Project, Session, Connection, Task, TaskStatus } from "../types.js";
+import type { TokenUsageEntry } from "./tokenUsage.js";
 
 const DATA_DIR =
   process.env.LOOP_DATA_DIR || resolve(process.cwd(), "data", "tasks");
@@ -365,4 +366,46 @@ export async function saveConnections(
   const tmp = `${CONNECTIONS_FILE}.tmp`;
   await writeFile(tmp, JSON.stringify(connections, null, 2), "utf8");
   await rename(tmp, CONNECTIONS_FILE);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token usage — one file, like connections; rewrites are infrequent (only
+// after an LLM call completes) and the array is small (one entry per
+// distinct model id we've ever seen).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOKEN_USAGE_FILE = resolve(DATA_ROOT, "_token_usage.json");
+
+/**
+ * Load all token-usage entries from disk. Returns [] when the file is
+ * missing or corrupt.
+ */
+export async function loadAllTokenUsage(): Promise<TokenUsageEntry[]> {
+  await mkdir(DATA_ROOT, { recursive: true });
+  try {
+    const content = await readFile(TOKEN_USAGE_FILE, "utf8");
+    const arr = JSON.parse(content);
+    if (!Array.isArray(arr)) return [];
+    return arr as TokenUsageEntry[];
+  } catch (err: unknown) {
+    if (
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code: string }).code === "ENOENT"
+    ) {
+      return [];
+    }
+    console.error("[persistence] Failed to load token usage:", err);
+    return [];
+  }
+}
+
+export async function saveTokenUsage(
+  entries: TokenUsageEntry[]
+): Promise<void> {
+  await mkdir(DATA_ROOT, { recursive: true });
+  const tmp = `${TOKEN_USAGE_FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(entries, null, 2), "utf8");
+  await rename(tmp, TOKEN_USAGE_FILE);
 }

@@ -46,6 +46,7 @@ export function createTask(input: {
   projectId?: string;
   sessionId?: string;
   contextFiles?: string[];
+  autoApprovePlan?: boolean;
 }): Task {
   const id = nanoid(12);
   const now = new Date().toISOString();
@@ -89,6 +90,7 @@ export function createTask(input: {
     projectId,
     sessionId,
     contextFiles: input.contextFiles,
+    autoApprovePlan: input.autoApprovePlan,
     createdAt: now,
     updatedAt: now,
     history: [],

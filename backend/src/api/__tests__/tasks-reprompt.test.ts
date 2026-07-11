@@ -63,3 +63,29 @@ describe("DELETE /api/tasks/:id", () => {
     expect(getTask(task.id)).toBeUndefined();
   });
 });
+
+describe("createTask + autoApprovePlan", () => {
+  it("persists autoApprovePlan onto the task", () => {
+    const task = createTask({ prompt: "p", workdir: "/tmp", autoApprovePlan: true });
+    expect(task.autoApprovePlan).toBe(true);
+  });
+
+  it("omits autoApprovePlan when not provided (preserves undefined, not false)", () => {
+    const task = createTask({ prompt: "p", workdir: "/tmp" });
+    expect(task.autoApprovePlan).toBeUndefined();
+  });
+
+  it("survives a round-trip through the API", async () => {
+    const res = await app().request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "prompt", workdir: "/tmp", autoApprovePlan: true }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.task.autoApprovePlan).toBe(true);
+    // Stop the orchestrator the POST just kicked off so it doesn't
+    // run real LLM work in CI.
+    await app().request(`/api/tasks/${body.task.id}/stop`, { method: "POST" });
+  });
+});
