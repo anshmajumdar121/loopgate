@@ -68,6 +68,67 @@ export interface HistoryEntry {
   message: string;
 }
 
+/**
+ * One row in the per-attempt timeline. Appended at the end of every
+ * implement→verify cycle so the UI can show "what happened on attempt 2"
+ * without re-running anything. Fields are populated from data the
+ * orchestrator already has in memory at that point — no extra LLM calls,
+ * no extra runtime checks, just a structured digest.
+ *
+ * Undefined-safe: every field is optional because the orchestrator may
+ * not reach every phase (e.g. a maker crash skips runtime + verify). The
+ * UI must render gracefully when most fields are missing.
+ */
+export interface AttemptRecord {
+  attemptNumber: number;
+  /** Phase wall-clock durations in ms. Set when each phase completes;
+   *  undefined for phases that didn't run (e.g. skipImplementation on
+   *  resume, or a crashed phase). */
+  makerMs?: number;
+  runtimeCheckMs?: number;
+  verifierMs?: number;
+  /** Reuse the existing DiffFileChange shape so the timeline can list
+   *  files-changed in the same style as the implementation step. */
+  filesChanged?: DiffFileChange[];
+  /** Runtime check summary — same shape as Task.runtimeCheck, but
+   *  per-attempt (so the timeline can show "attempt 2 had a clean
+   *  runtime check" even if attempt 3's check failed). */
+  runtimeResult?: {
+    passed: boolean;
+    consoleErrorCount: number;
+    pageErrorCount: number;
+    screenshotRelPath: string | null;
+  };
+  /** Verifier outcome for this attempt. */
+  verifierVerdict?: VerdictOutcome;
+  /** The verifier's stated reason (filled from Verdict.oneLineReason for
+   *  REJECT, from Verdict.oneLineReason for APPROVE, and the synthetic
+   *  reason for ESCALATE_HUMAN). */
+  rejectReason?: string;
+  /** Paths to the raw per-attempt artifacts the user can open in their
+   *  editor. Relative to the workdir, e.g. ".loop/maker-attempt-1-raw.md".
+   *  Populated at append time from the orchestrator's known file paths. */
+  artifactPaths?: {
+    maker?: string;
+    runtimeJson?: string;
+    runtimePng?: string;
+    verifier?: string;
+  };
+  /** Set true when the stuck-loop detector (see orchestrator.ts) escalated
+   *  because this attempt repeated the previous one. UI uses this to
+   *  surface a "STUCK" badge on the affected attempt card. */
+  stuckDetected?: boolean;
+  /** Outcome of the pre-runtime validation step (syntax check + no-op
+   *  guard). When present and `passed === false`, the attempt short-
+   *  circuited before the runtime check ran. */
+  validation?: {
+    passed: boolean;
+    errors: string[];
+  };
+  /** ISO timestamp when the attempt completed. */
+  completedAt?: string;
+}
+
 export interface LogEntry {
   ts: string;
   agent: AgentRole;
@@ -160,10 +221,19 @@ export interface Task {
      *  `${task.previewUrl}${task.runtimeCheck.screenshotRelPath}` */
     screenshotRelPath: string | null;
   };
+  /** Per-attempt timeline. One record is appended at the end of every
+   *  implement→verify cycle, regardless of outcome. Optional + additive —
+   *  tasks created before this field existed load as `attempts: undefined`
+   *  and the UI renders nothing for them. See AttemptRecord below. */
+  attempts?: AttemptRecord[];
   /** Absolute paths of reference files whose contents are inlined into the
    *  planner and maker prompts ("here's how the existing feature works").
    *  Capped at 20KB/file, 60KB total at prompt-build time. */
   contextFiles?: string[];
+  /** Set at task creation; if true, the orchestrator skips the plan_review
+   *  user gate and proceeds straight to implementation. Useful for mock
+   *  runs and automation. */
+  autoApprovePlan?: boolean;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */

@@ -50,6 +50,7 @@ import {
 import { watchFiles, type FileWatcher, type WatchedFile } from "./state-sync.js";
 import { registerPreview } from "./preview-server.js";
 import { runRuntimeCheck, type RuntimeCheckResult } from "./runtime-check.js";
+import type { AttemptRecord, VerdictOutcome } from "../types.js";
 import { resolveConnectionModel } from "../store/connections.js";
 import { readFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
@@ -557,6 +558,13 @@ try {
       log("orchestrator", "info", `⏸ PLAN REVIEW — waiting for confirm or adjust (${planAdjustCount}/${MAX_PLAN_ADJUSTS} adjusts so far)`);
       nodeStatus("plan_review", "running");
 
+      // ponytail: autoApprovePlan = skip the user gate, fall through to Phase 2
+      if (initialTask.autoApprovePlan) {
+        log("orchestrator", "info", "▶ autoApprovePlan set — skipping plan review");
+        nodeStatus("plan_review", "success");
+        break;
+      }
+
       // Block until user confirms OR adjusts. The two event kinds are
       // registered as separate promises so resolveEvent() picks the right
       // one when the matching endpoint fires.
@@ -637,6 +645,22 @@ try {
       // while the previous phase was winding down.
       if (bailIfCancelled(taskId, log, "before implementation")) return;
 
+      // Per-attempt timing — each phase stamps its own start so the
+      // AttemptRecord we append at the end of the cycle can report
+      // realistic phase durations. attemptStartMs is the wall clock for
+      // the whole attempt; the per-phase markers are set just before the
+      // phase begins and read at append time.
+      const attemptStartMs = Date.now();
+      let makerStartMs: number | null = null;
+      let makerEndMs: number | null = null;
+      let runtimeStartMs: number | null = null;
+      let runtimeEndMs: number | null = null;
+      let verifierStartMs: number | null = null;
+      let verifierEndMs: number | null = null;
+      // Validation outcome for the per-attempt timeline (set inside the
+      // maker block when the pre-runtime gate runs).
+      let validationOutcome: { passed: boolean; errors: string[] } | null = null;
+
       // These four are filled in by either the implementation block
       // below or by the resume-skip branch — Phase 3 (verify) reads
       // them in either case.
@@ -675,6 +699,7 @@ try {
         emit("implementing", `Attempt ${attempt}: dispatching loop-maker`);
         log("maker", "info", `▶ IMPLEMENT attempt ${attempt}`);
         nodeStatus("maker", "running");
+        makerStartMs = Date.now();
 
         const latestState = watcher.getLatestContent("STATE.md");
         const feedback = LAST_FEEDBACK.get(taskId);
@@ -755,18 +780,21 @@ try {
           "stdout",
           `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
         );
+        makerEndMs = Date.now();
 
         // ─── Runtime check: serve the workdir and actually RUN the prototype.
         // The verifier gets this evidence verbatim; a broken page can no
         // longer be APPROVEd on source-reading alone. `runtime` is reused
         // below by the verifier-prompt builder and the REJECT-feedback path.
         try {
+          runtimeStartMs = Date.now();
           const previewUrl = await registerPreview(taskId, initialTask.workdir);
           updateTask(taskId, { previewUrl });
           const t2 = getTask(taskId);
           if (t2) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t2 });
           log("orchestrator", "info", `▶ RUNTIME CHECK — loading ${previewUrl} in headless chromium`);
           runtime = await runRuntimeCheck(previewUrl, initialTask.workdir, attempt);
+          runtimeEndMs = Date.now();
           log(
             "orchestrator",
             runtime.ok ? "info" : "stderr",
@@ -799,6 +827,7 @@ try {
       emit("verifying", `Attempt ${attempt}: dispatching loop-verifier`);
       log("verifier", "info", `▶ VERIFY attempt ${attempt}`);
       nodeStatus("verifier", "running");
+      verifierStartMs = Date.now();
 
       const verifierPrompt = await buildVerifierPrompt(
         attempt,
@@ -877,6 +906,42 @@ try {
         task: getTask(taskId)!,
       });
       log("verifier", "stdout", `✓ VERDICT ${verdict.outcome} — ${verdict.oneLineReason}`);
+      verifierEndMs = Date.now();
+
+      // ─── Append the AttemptRecord for this cycle (Task 1: per-attempt
+      // timeline). The record captures what just happened regardless of
+      // what the DECIDE block does next — APPROVE / ESCALATE / REJECT all
+      // land in the timeline so the UI can show the full history. We
+      // patch attempts as a NEW array (immutable append) so the shallow
+      // spread in updateTask doesn't drop unrelated fields.
+      appendAttemptRecord(taskId, attempt, {
+        makerMs: makerEndMs && makerStartMs ? makerEndMs - makerStartMs : undefined,
+        runtimeCheckMs:
+          runtimeEndMs && runtimeStartMs ? runtimeEndMs - runtimeStartMs : undefined,
+        verifierMs:
+          verifierEndMs && verifierStartMs ? verifierEndMs - verifierStartMs : undefined,
+        filesChanged: diff?.filesChanged,
+        runtimeResult: runtime
+          ? {
+              passed: runtime.ok,
+              consoleErrorCount: runtime.consoleErrors.length,
+              pageErrorCount: runtime.pageErrors.length,
+              screenshotRelPath: runtime.screenshotPath
+                ? `.loop/${runtime.screenshotPath.split("/").pop()}`
+                : null,
+            }
+          : undefined,
+        verifierVerdict: verdict.outcome as VerdictOutcome,
+        rejectReason: verdict.oneLineReason,
+        artifactPaths: {
+          maker: `.loop/maker-attempt-${attempt}-raw.md`,
+          runtimeJson: `.loop/runtime-attempt-${attempt}.json`,
+          runtimePng: `.loop/runtime-attempt-${attempt}.png`,
+          verifier: `.loop/verifier-attempt-${attempt}-raw.md`,
+        },
+        validation: validationOutcome ?? undefined,
+        completedAt: new Date().toISOString(),
+      });
 
       // ─── Phase 4: DECIDE ─────────────────────────────────────────────
       if (verdict.outcome === "APPROVE") {
@@ -1458,6 +1523,39 @@ function resolveModel(
 
 type LogFn = (a: AgentRole, s: LogLevel, t: string) => void;
 type EmitFn = (status: TaskStatus, message?: string) => void;
+
+/**
+ * Append one AttemptRecord to a task's `attempts` array. Immutable: reads
+ * the current array, appends, writes a fresh array via updateTask so the
+ * shallow spread in updateTask doesn't drop any sibling fields. If the
+ * task already has a record with the same `attemptNumber` (e.g. a resume
+ * replays a cycle), the new record REPLACES the old one for that
+ * attempt — the resume is the authoritative version.
+ *
+ * Called from the runLoop after each verifier cycle, regardless of
+ * outcome (APPROVE / REJECT / ESCALATE_HUMAN all land in the timeline).
+ */
+function appendAttemptRecord(
+  taskId: string,
+  attemptNumber: number,
+  fields: Omit<AttemptRecord, "attemptNumber" | "completedAt"> & {
+    completedAt?: string;
+  }
+): void {
+  const t = getTask(taskId);
+  if (!t) return;
+  const existing = t.attempts ?? [];
+  const filtered = existing.filter((a) => a.attemptNumber !== attemptNumber);
+  const next: AttemptRecord = {
+    ...fields,
+    attemptNumber,
+    completedAt: fields.completedAt ?? new Date().toISOString(),
+  };
+  updateTask(taskId, {
+    attempts: [...filtered, next].sort((a, b) => a.attemptNumber - b.attemptNumber),
+  });
+  // updateTask's task_update broadcast already covers WS subscribers.
+}
 
 function escalate(
   taskId: string,
