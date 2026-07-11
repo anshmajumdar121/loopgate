@@ -57,3 +57,6 @@ backend/data/
 *.tmp
 *~
 .dtps
+
+# Embedded standalone repo (own git history)
+loop-rt/
