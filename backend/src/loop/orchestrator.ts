@@ -560,13 +560,58 @@ try {
         plannerTarget.connection
       );
 
-      const goalContent = await awaitPhaseOutput(
-        watcher,
-        "GOAL.md",
-        planner,
-        PHASE_TIMEOUT_MS,
-        taskId
-      );
+      // Stall watchdog for the planner (Task 1 leftover of
+      // 2026-07-11-loop-resilience-and-real-build). Same pattern as the
+      // verifier: first stall → kill + re-invoke once, second stall →
+      // escalate with a distinct STALLED reason. Non-stall errors
+      // propagate to the outer catch exactly as before. Planner stalls
+      // happen before any implement/verify attempt exists, so there is
+      // no AttemptRecord to annotate — the log lines carry the signal.
+      let goalContent: string;
+      try {
+        goalContent = await withStallWatchdog(
+          awaitPhaseOutput(watcher, "GOAL.md", planner, PHASE_TIMEOUT_MS, taskId),
+          planner,
+          "planner"
+        );
+      } catch (err) {
+        if (isCancelled(taskId)) return;
+        if (!(err instanceof StallError)) throw err;
+        log(
+          "planner",
+          "stderr",
+          `⟳ planner stalled (no output ${STALL_TIMEOUT_MS / 1000}s) — re-invoking (salvage attempt 1/1)`
+        );
+        const retryPlanner = spawnPlanner(
+          taskId,
+          initialTask.workdir,
+          plannerPrompt,
+          log,
+          plannerTarget.model,
+          plannerTarget.connection
+        );
+        try {
+          goalContent = await withStallWatchdog(
+            awaitPhaseOutput(watcher, "GOAL.md", retryPlanner, PHASE_TIMEOUT_MS, taskId),
+            retryPlanner,
+            "planner"
+          );
+        } catch (retryErr) {
+          if (isCancelled(taskId)) return;
+          if (retryErr instanceof StallError) {
+            log("planner", "stderr", `✗ planner stalled twice — escalating`);
+            nodeStatus("planner", "error");
+            escalate(
+              taskId,
+              `STALLED: planner produced no output twice (waited ${STALL_TIMEOUT_MS / 1000}s each)`,
+              log,
+              emit
+            );
+            return;
+          }
+          throw retryErr;
+        }
+      }
       log("planner", "stdout", `planner wrote GOAL.md (${goalContent.length} chars)`);
 
       // If the user pressed Stop while the planner was writing, don't
