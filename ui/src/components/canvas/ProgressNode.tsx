@@ -517,6 +517,20 @@ function StepDetail({
           label="Tests"
           value={`${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`}
         />
+        {diff.filesChanged.length > 0 && (
+          <li className="mt-1 space-y-0.5">
+            {diff.filesChanged.map((f, i) => (
+              <div
+                key={i}
+                className="font-mono text-zinc-500 dark:text-zinc-400"
+                style={{ fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                title={f.reason}
+              >
+                {f.path}
+              </div>
+            ))}
+          </li>
+        )}
       </ul>
     );
   }
