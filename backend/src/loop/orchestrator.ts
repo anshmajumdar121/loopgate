@@ -48,7 +48,10 @@ import {
   type AgentHandle,
 } from "./agent-spawner.js";
 import { watchFiles, type FileWatcher, type WatchedFile } from "./state-sync.js";
-import { registerPreview } from "./preview-server.js";
+import {
+  registerPreview,
+  getPreviewServerBindCount,
+} from "./preview-server.js";
 import { runRuntimeCheck, type RuntimeCheckResult } from "./runtime-check.js";
 import type { AttemptRecord, VerdictOutcome } from "../types.js";
 import { resolveConnectionModel } from "../store/connections.js";
@@ -788,7 +791,21 @@ try {
         // below by the verifier-prompt builder and the REJECT-feedback path.
         try {
           runtimeStartMs = Date.now();
+          // Snapshot the bind counter before/after so we can detect a
+          // self-healing restart and tell the user the preview link
+          // survived. If the server died between tasks (or mid-run),
+          // ensureServer() re-binds on the next registerPreview call —
+          // the counter goes up, and we log + re-broadcast so the UI
+          // shows the live link again instead of pointing at a dead port.
+          const bindsBefore = getPreviewServerBindCount();
           const previewUrl = await registerPreview(taskId, initialTask.workdir);
+          if (getPreviewServerBindCount() > bindsBefore) {
+            log(
+              "orchestrator",
+              "info",
+              "↻ preview server restarted — re-registering preview URL"
+            );
+          }
           updateTask(taskId, { previewUrl });
           const t2 = getTask(taskId);
           if (t2) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t2 });
@@ -946,10 +963,21 @@ try {
       // ─── Phase 4: DECIDE ─────────────────────────────────────────────
       if (verdict.outcome === "APPROVE") {
         // Register a preview in case the runtime check didn't run (e.g.
-        // resume path that jumped straight to verifying).
+        // resume path that jumped straight to verifying). Same restart
+        // detection as the post-maker path — if the server is dead and
+        // needs a re-bind, log it so the Live Preview link in the UI
+        // doesn't silently point at a dead port.
         if (!getTask(taskId)?.previewUrl) {
           try {
+            const bindsBefore = getPreviewServerBindCount();
             const previewUrl = await registerPreview(taskId, initialTask.workdir);
+            if (getPreviewServerBindCount() > bindsBefore) {
+              log(
+                "orchestrator",
+                "info",
+                "↻ preview server restarted — re-registering preview URL"
+              );
+            }
             updateTask(taskId, { previewUrl });
           } catch { /* preview is best-effort */ }
         }
