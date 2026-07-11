@@ -774,6 +774,19 @@ try {
               ? `✓ RUNTIME CHECK — no errors (${runtime.interactionLog.length} interactions)`
               : `✗ RUNTIME CHECK — ${runtime.pageErrors.length} page errors, ${runtime.consoleErrors.length} console errors (screenshot: ${runtime.screenshotPath})`
           );
+          updateTask(taskId, {
+            runtimeCheck: {
+              attempt,
+              ok: runtime.ok,
+              pageErrorCount: runtime.pageErrors.length,
+              consoleErrorCount: runtime.consoleErrors.length,
+              screenshotRelPath: runtime.screenshotPath
+                ? `.loop/${runtime.screenshotPath.split("/").pop()}`
+                : null,
+            },
+          });
+          const t3 = getTask(taskId);
+          if (t3) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t3 });
         } catch (err) {
           log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — verifier will judge from source only`);
         }

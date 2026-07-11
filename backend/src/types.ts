@@ -145,6 +145,21 @@ export interface Task {
    *  output). Served by loop/preview-server.ts. Optional + additive so
    *  previously persisted tasks keep loading. */
   previewUrl?: string;
+  /** Summary of the most recent headless-browser runtime check (see
+   *  loop/runtime-check.ts). Optional + additive. The UI uses this to show
+   *  a pass/fail badge and link to the screenshot without re-running
+   *  anything — the full RuntimeCheckResult lives only in orchestrator
+   *  memory during the loop; this is the persisted digest. */
+  runtimeCheck?: {
+    attempt: number;
+    ok: boolean;
+    pageErrorCount: number;
+    consoleErrorCount: number;
+    /** Relative path from the workdir, e.g. ".loop/runtime-attempt-1.png".
+     *  Combine with `previewUrl` to get a fetchable URL:
+     *  `${task.previewUrl}${task.runtimeCheck.screenshotRelPath}` */
+    screenshotRelPath: string | null;
+  };
   /** Absolute paths of reference files whose contents are inlined into the
    *  planner and maker prompts ("here's how the existing feature works").
    *  Capped at 20KB/file, 60KB total at prompt-build time. */
