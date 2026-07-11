@@ -30,6 +30,7 @@ export function NewTaskModal({
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
   const [workdir, setWorkdir] = useState("");
+  const [contextFilesRaw, setContextFilesRaw] = useState("");
   const [projectId, setProjectId] = useState<string | undefined>(
     initialProjectId
   );
@@ -81,6 +82,11 @@ export function NewTaskModal({
         prompt: prompt.trim(),
         title: title.trim() || undefined,
         workdir: workdir.trim() || undefined,
+        contextFiles: contextFilesRaw
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 10),
         projectId: projectId || undefined,
         sessionId: sessionId || undefined,
       };
@@ -186,6 +192,20 @@ export function NewTaskModal({
             or type / browse your own path to override.
           </p>
         )}
+
+        <label className="mb-1.5 mt-3 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+          Reference files (optional)
+        </label>
+        <textarea
+          value={contextFilesRaw}
+          onChange={(e) => setContextFilesRaw(e.target.value)}
+          placeholder={"One absolute path per line, e.g.\n/Users/you/project/src/Editor/SplitMask.tsx"}
+          rows={3}
+          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-[12px] text-zinc-900 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        />
+        <p className="mt-1.5 text-[10.5px] text-zinc-500 dark:text-zinc-400">
+          Contents are inlined into the planner and maker prompts (capped at 20KB/file, 60KB total).
+        </p>
 
         <div className="mt-3 grid grid-cols-2 gap-2">
           <div>

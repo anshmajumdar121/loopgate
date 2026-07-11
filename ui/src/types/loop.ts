@@ -169,6 +169,9 @@ export interface CreateTaskBody {
   prompt: string;
   title?: string;
   workdir?: string;
+  /** Absolute paths of reference files inlined into the planner/maker
+   *  prompts. Mirrors backend/src/types.ts CreateTaskBody.contextFiles. */
+  contextFiles?: string[];
   autoApprovePlan?: boolean;
   model?: string;
   modelOverrides?: {
