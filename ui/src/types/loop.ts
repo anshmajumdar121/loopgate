@@ -97,6 +97,15 @@ export interface Task {
    *  output). Served by the backend's preview-server. Optional + additive
    *  so previously persisted tasks keep loading. */
   previewUrl?: string;
+  /** Summary of the most recent headless-browser runtime check. Optional +
+   *  additive — mirrors backend/src/types.ts Task.runtimeCheck. */
+  runtimeCheck?: {
+    attempt: number;
+    ok: boolean;
+    pageErrorCount: number;
+    consoleErrorCount: number;
+    screenshotRelPath: string | null;
+  };
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
