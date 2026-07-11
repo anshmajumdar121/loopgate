@@ -960,6 +960,37 @@ try {
         completedAt: new Date().toISOString(),
       });
 
+      // ─── Stuck-loop detector (Task 4). On REJECT, compare the just-
+      // appended attempt against the previous one. If they changed the
+      // same files AND got the same reject reason AND (if both ran the
+      // runtime check) had the same error signature, the LLM is stuck
+      // — short-circuit by escalating now instead of burning the
+      // remaining retries on identical failures. The attempt record is
+      // tagged stuckDetected so the UI can label it. The max-attempts
+      // cap stays as the outer bound; this detector only ever
+      // escalates EARLIER, never extends the loop.
+      if (verdict.outcome === "REJECT") {
+        const t = getTask(taskId);
+        const all = t?.attempts ?? [];
+        const prev = all.find((a) => a.attemptNumber === attempt - 1);
+        const curr = all.find((a) => a.attemptNumber === attempt);
+        if (prev && curr && isStuckRepeat(prev, curr)) {
+          markAttemptStuck(taskId, attempt);
+          log(
+            "orchestrator",
+            "stderr",
+            `✗ STUCK — attempt ${attempt} repeated attempt ${attempt - 1} (identical diff + errors); escalating now`
+          );
+          escalate(
+            taskId,
+            `STUCK: attempt ${attempt} repeated attempt ${attempt - 1} (identical diff and errors)`,
+            log,
+            emit
+          );
+          return;
+        }
+      }
+
       // ─── Phase 4: DECIDE ─────────────────────────────────────────────
       if (verdict.outcome === "APPROVE") {
         // Register a preview in case the runtime check didn't run (e.g.
@@ -1583,6 +1614,79 @@ function appendAttemptRecord(
     attempts: [...filtered, next].sort((a, b) => a.attemptNumber - b.attemptNumber),
   });
   // updateTask's task_update broadcast already covers WS subscribers.
+}
+
+/**
+ * Stuck-loop detector. Two consecutive attempts are "stuck" when they
+ * changed the same set of files AND the verifier rejected with the same
+ * reason AND (if both ran the runtime check) the runtime error signature
+ * matches. This is the cheap, deterministic short-circuit for the
+ * "LLM is making the same mistake forever" failure mode — without it,
+ * the loop burns all 3 attempts on identical outputs and only then
+ * escalates.
+ *
+ * Returns true if `curr` repeats `prev` exactly enough to look stuck.
+ * The match is conservative (all three signals must align) so we don't
+ * false-positive on legitimately-different attempts that happen to
+ * touch the same files.
+ */
+function isStuckRepeat(prev: AttemptRecord, curr: AttemptRecord): boolean {
+  // 1. Same set of changed file paths (order-insensitive). A no-op diff
+  //    on one side but not the other is NOT a repeat — the LLM might
+  //    be making progress in some direction. require both sides to
+  //    have at least one file change.
+  const prevFiles = (prev.filesChanged ?? []).map((f) => f.path).sort();
+  const currFiles = (curr.filesChanged ?? []).map((f) => f.path).sort();
+  if (prevFiles.length === 0) return false;
+  if (prevFiles.join("\u0000") !== currFiles.join("\u0000")) return false;
+
+  // 2. Same verifier reject reason (verbatim).
+  if ((prev.rejectReason ?? "") !== (curr.rejectReason ?? "")) return false;
+
+  // 3. Same runtime error signature. If one side didn't run the
+  //    runtime check (e.g. it short-circuited via validation, or
+  //    crashed before reaching it) and the other did, that's a
+  //    different path and NOT a repeat.
+  const hasRuntime = (a: AttemptRecord) => Boolean(a.runtimeResult);
+  if (hasRuntime(prev) !== hasRuntime(curr)) return false;
+  if (hasRuntime(prev) && hasRuntime(curr)) {
+    const prevSig = [
+      prev.runtimeResult!.pageErrorCount,
+      prev.runtimeResult!.consoleErrorCount,
+      prev.runtimeResult!.passed ? "1" : "0",
+    ].join("|");
+    const currSig = [
+      curr.runtimeResult!.pageErrorCount,
+      curr.runtimeResult!.consoleErrorCount,
+      curr.runtimeResult!.passed ? "1" : "0",
+    ].join("|");
+    if (prevSig !== currSig) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Mark an attempt as stuckDetected in the timeline. Reads the current
+ * attempts array, finds the matching record, and writes it back with
+ * the flag flipped. Independent of appendAttemptRecord because we only
+ * know a cycle is stuck AFTER it has been appended (we need the
+ * previous attempt's record to compare against).
+ */
+function markAttemptStuck(taskId: string, attemptNumber: number): void {
+  const t = getTask(taskId);
+  if (!t || !t.attempts) return;
+  let mutated = false;
+  const next = t.attempts.map((a) => {
+    if (a.attemptNumber === attemptNumber && !a.stuckDetected) {
+      mutated = true;
+      return { ...a, stuckDetected: true };
+    }
+    return a;
+  });
+  if (mutated) {
+    updateTask(taskId, { attempts: next });
+  }
 }
 
 function escalate(
