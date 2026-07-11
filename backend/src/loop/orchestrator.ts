@@ -53,6 +53,7 @@ import {
   getPreviewServerBindCount,
 } from "./preview-server.js";
 import { runRuntimeCheck, type RuntimeCheckResult } from "./runtime-check.js";
+import { runValidation } from "./validation.js";
 import type { AttemptRecord, VerdictOutcome } from "../types.js";
 import { resolveConnectionModel } from "../store/connections.js";
 import { readFile } from "node:fs/promises";
@@ -663,6 +664,11 @@ try {
       // Validation outcome for the per-attempt timeline (set inside the
       // maker block when the pre-runtime gate runs).
       let validationOutcome: { passed: boolean; errors: string[] } | null = null;
+      // Snapshot of the previous attempt's file contents, captured
+      // BEFORE the maker runs (so we can compare against the new
+      // attempt's contents to detect the "no effective change" failure
+      // mode). Populated below from task.diff.filesChanged.
+      let previousFilesSnapshot: Record<string, string> = {};
 
       // These four are filled in by either the implementation block
       // below or by the resume-skip branch — Phase 3 (verify) reads
@@ -703,6 +709,27 @@ try {
         log("maker", "info", `▶ IMPLEMENT attempt ${attempt}`);
         nodeStatus("maker", "running");
         makerStartMs = Date.now();
+
+        // Capture the previous attempt's file contents BEFORE the maker
+        // overwrites them — the validator's no-op guard uses this to
+        // detect "the LLM wrote the same bytes as last time". For
+        // attempt 1 there's no previous, so the snapshot is empty and
+        // the guard falls back to "zero files changed" only.
+        if (task.diff?.filesChanged) {
+          for (const f of task.diff.filesChanged) {
+            try {
+              previousFilesSnapshot[f.path] = await readFile(
+                pathResolve(task.workdir, f.path),
+                "utf8"
+              );
+            } catch {
+              // File didn't exist on disk before the maker — record an
+              // empty string so the validator treats it as a NEW file
+              // (it will compare against "" and find a real diff).
+              previousFilesSnapshot[f.path] = "";
+            }
+          }
+        }
 
         const latestState = watcher.getLatestContent("STATE.md");
         const feedback = LAST_FEEDBACK.get(taskId);
@@ -784,6 +811,84 @@ try {
           `✓ IMPLEMENT — ${diff.filesChanged.length} files changed, build exit ${diff.buildExit}`
         );
         makerEndMs = Date.now();
+
+        // ─── Pre-runtime validation (Task 5). Two cheap gates run
+        // BEFORE we pay for the headless-browser runtime check:
+        //   (a) no-op guard: zero files, or every changed file is
+        //       byte-identical to the previous attempt
+        //   (b) syntax gate: `node --check` on JS/TS files
+        // On failure, set validationOutcome, save the diff (it stays
+        // accurate), append an AttemptRecord, set LAST_FEEDBACK with
+        // the validation error, and skip straight to the next attempt.
+        // The runtime check + verifier + DECIDE block are short-
+        // circuited. We do NOT return from runLoop — the loop
+        // continues with attempt+1.
+        const validation = await runValidation(
+          initialTask.workdir,
+          diff.filesChanged,
+          previousFilesSnapshot
+        );
+        if (!validation.passed) {
+          validationOutcome = validation;
+          log(
+            "orchestrator",
+            "stderr",
+            `✗ VALIDATION — ${validation.errors[0]}${
+              validation.errors.length > 1
+                ? ` (+${validation.errors.length - 1} more)`
+                : ""
+            }`
+          );
+          // Save the diff so the timeline shows what the maker tried
+          // to change, even though we short-circuited before the
+          // runtime check.
+          updateTask(taskId, { diff });
+          // Append the AttemptRecord. The runtime and verifier are
+          // both undefined here — the timeline card will show
+          // "PRE-RT FAIL" via the validation field, no runtime result,
+          // and no verifier verdict. The reason field carries the
+          // validation error message verbatim.
+          appendAttemptRecord(taskId, attempt, {
+            makerMs:
+              makerEndMs && makerStartMs ? makerEndMs - makerStartMs : undefined,
+            filesChanged: diff.filesChanged,
+            runtimeResult: undefined,
+            verifierVerdict: undefined,
+            rejectReason: validation.errors[0]?.slice(0, 300),
+            artifactPaths: {
+              maker: `.loop/maker-attempt-${attempt}-raw.md`,
+              runtimeJson: `.loop/runtime-attempt-${attempt}.json`,
+              runtimePng: `.loop/runtime-attempt-${attempt}.png`,
+              verifier: `.loop/verifier-attempt-${attempt}-raw.md`,
+            },
+            validation: validation,
+            completedAt: new Date().toISOString(),
+          });
+          // Feed the validation error back as feedback for the next
+          // attempt's maker. This is auto-generated (no human feedback
+          // wait) — exactly the same pathway the runtime-check
+          // errors use on REJECT.
+          LAST_FEEDBACK.set(
+            taskId,
+            `VALIDATION FAILED on your previous attempt:\n${validation.errors.join(
+              "\n"
+            )}\n\nFix these issues and try again.`
+          );
+          log(
+            "orchestrator",
+            "info",
+            "▶ auto-continue triggered (validation fail)"
+          );
+          // Continue the while loop to the next attempt. The DECIDE
+          // block at the bottom of the iteration is reached but
+          // verdict is null and runtime is null, so neither the
+          // APPROVE nor REJECT paths match — but we don't want the
+          // REJECT path to wait for human feedback here. Use a
+          // labeled continue to skip the rest of the loop body.
+          continue;
+        }
+        // validation.passed: log success and fall through to runtime check.
+        log("orchestrator", "info", "✓ VALIDATION — passed");
 
         // ─── Runtime check: serve the workdir and actually RUN the prototype.
         // The verifier gets this evidence verbatim; a broken page can no
