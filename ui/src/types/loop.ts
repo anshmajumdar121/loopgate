@@ -154,7 +154,20 @@ export interface AttemptRecord {
     passed: boolean;
     errors: string[];
   };
+  /** Stall watchdog events for this attempt. Mirrors
+   *  backend/src/types.ts AttemptRecord.stalls. */
+  stalls?: StallRecord[];
   completedAt?: string;
+}
+
+/**
+ * One row in the per-attempt stall watchdog log. Mirrors
+ * backend/src/types.ts StallRecord. Optional + additive.
+ */
+export interface StallRecord {
+  phase: "planner" | "verifier" | "maker";
+  stalledAfterMs: number;
+  resolution: "partial-output" | "reinvoke" | "escalated";
 }
 
 /**

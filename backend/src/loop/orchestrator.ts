@@ -85,6 +85,64 @@ const PHASE_TIMEOUT_MS = Number(process.env.LOOP_PHASE_TIMEOUT_MS || 20 * 60_000
  *  worst case × 4 (output scaling) + margin. */
 const MAKER_TIMEOUT_MS = Number(process.env.LOOP_MAKER_TIMEOUT_MS || 25 * 60_000);
 
+/** Stall watchdog: how long a planner/verifier may stream NO output before
+ *  the watchdog declares it stalled and either salvage-parses or re-invokes.
+ *  Default 4min is well below the 20min PHASE_TIMEOUT_MS so a single stalled
+ *  verifier doesn't burn the full outer bound. Env-overridable so tests can
+ *  drive a low value without waiting real minutes. */
+const STALL_TIMEOUT_MS = Number(process.env.LOOP_STALL_TIMEOUT_MS || 4 * 60_000);
+
+/** Thrown by the stall watchdog when a phase went quiet for STALL_TIMEOUT_MS.
+ *  The orchestrator catches this and decides: salvage, re-invoke, or escalate. */
+export class StallError extends Error {
+  constructor(public phase: "planner" | "verifier" | "maker") {
+    super(`STALLED: ${phase} produced no output for STALL_TIMEOUT_MS`);
+    this.name = "StallError";
+  }
+}
+
+/**
+ * Race an inner promise against a stall timer. If the agent doesn't produce
+ * any stdout/stderr activity for `timeoutMs` (read off the handle's
+ * `lastActivityAt`), reject with `StallError`. The orchestrator's caller is
+ * responsible for killing the agent and deciding to re-invoke or escalate.
+ *
+ * ponytail: deliberately NOT replacing the existing `awaitPhaseOutput`
+ * timeout — that stays as the outer 20min bound. The stall watchdog only
+ * fires EARLIER, so a slow-but-alive stream never trips it.
+ */
+export function withStallWatchdog<T>(
+  inner: Promise<T>,
+  agent: AgentHandle,
+  phase: "planner" | "verifier",
+  timeoutMs: number = STALL_TIMEOUT_MS,
+  pollMs: number = 30_000
+): Promise<T> {
+  // ponytail: poll the spawner's `lastActivityAt` (updated by the
+  // stdout/stderr line buffer on every chunk). If it hasn't been touched
+  // in `timeoutMs`, the agent is hung-but-alive — kill it and reject
+  // with StallError so the orchestrator can salvage or re-invoke.
+  // The OUTER PHASE_TIMEOUT_MS in awaitPhaseOutput still bounds total
+  // wall time; this watchdog only fires earlier.
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let resolved = false;
+  const stallPromise = new Promise<never>((_, reject) => {
+    timer = setInterval(() => {
+      if (resolved) return;
+      if (Date.now() - agent.lastActivityAt > timeoutMs) {
+        resolved = true;
+        if (timer) clearInterval(timer);
+        agent.kill();
+        reject(new StallError(phase));
+      }
+    }, pollMs);
+  });
+  return Promise.race([inner, stallPromise]).finally(() => {
+    resolved = true;
+    if (timer) clearInterval(timer);
+  }) as Promise<T>;
+}
+
 /** Maximum number of times the user can request "Adjust & Re-plan" before
  *  we escalate. Beyond this, ping-ponging on the plan usually means the
  *  user's intent isn't converging on something the planner can produce —
@@ -664,6 +722,12 @@ try {
       // Validation outcome for the per-attempt timeline (set inside the
       // maker block when the pre-runtime gate runs).
       let validationOutcome: { passed: boolean; errors: string[] } | null = null;
+      // Stall events for this attempt (Task 1 of
+      // 2026-07-11-loop-resilience-and-real-build). Pushed by the
+      // verifier (and later planner) watchdog blocks; read at append
+      // time so the timeline can label each STALLED event with its
+      // resolution.
+      const stallsThisAttempt: import("../types.js").StallRecord[] = [];
       // Snapshot of the previous attempt's file contents, captured
       // BEFORE the maker runs (so we can compare against the new
       // attempt's contents to detect the "no effective change" failure
@@ -971,27 +1035,87 @@ try {
 
       let stateAfterVerify: string;
       try {
-        stateAfterVerify = await awaitPhaseOutput(
-          watcher,
-          "STATE.md",
+        // ponytail: stall watchdog (Task 1 of
+        // 2026-07-11-loop-resilience-and-real-build). Wraps awaitPhaseOutput
+        // with a STALL_TIMEOUT_MS race; on first stall kill + re-invoke
+        // once, on second stall escalate. The outer PHASE_TIMEOUT_MS
+        // still bounds total wall time.
+        stateAfterVerify = await withStallWatchdog(
+          awaitPhaseOutput(watcher, "STATE.md", verifier, PHASE_TIMEOUT_MS, taskId),
           verifier,
-          PHASE_TIMEOUT_MS,
-          taskId
+          "verifier"
         );
       } catch (err) {
         if (isCancelled(taskId)) {
-          // stopLoop already set status + broadcast — nothing more to do.
           return;
         }
-        log("verifier", "stderr", `✗ VERIFY FAILED — ${errorMsg(err)}`);
-        nodeStatus("verifier", "error");
-        escalate(
-          taskId,
-          `Verifier failed on attempt ${attempt}: ${errorMsg(err)}`,
-          log,
-          emit
-        );
-        return;
+        if (err instanceof StallError) {
+          // First stall — re-invoke the verifier exactly once. Record
+          // the event on the attempt so the timeline can label it.
+          log(
+            "verifier",
+            "stderr",
+            `⟳ verifier stalled (no output ${STALL_TIMEOUT_MS / 1000}s) — re-invoking (salvage attempt 1/1)`
+          );
+          stallsThisAttempt.push({
+            phase: "verifier",
+            stalledAfterMs: STALL_TIMEOUT_MS,
+            resolution: "reinvoke",
+          });
+          const retryVerifier = spawnVerifier(
+            taskId,
+            task.workdir,
+            verifierPrompt,
+            log,
+            verifierTarget.model,
+            verifierTarget.connection
+          );
+          try {
+            stateAfterVerify = await withStallWatchdog(
+              awaitPhaseOutput(watcher, "STATE.md", retryVerifier, PHASE_TIMEOUT_MS, taskId),
+              retryVerifier,
+              "verifier"
+            );
+          } catch (retryErr) {
+            if (isCancelled(taskId)) return;
+            if (retryErr instanceof StallError) {
+              // Second stall — escalate with a distinct STALLED reason.
+              stallsThisAttempt.push({
+                phase: "verifier",
+                stalledAfterMs: STALL_TIMEOUT_MS,
+                resolution: "escalated",
+              });
+              log("verifier", "stderr", `✗ verifier stalled twice — escalating`);
+              nodeStatus("verifier", "error");
+              escalate(
+                taskId,
+                `STALLED: verifier produced no output twice (waited ${STALL_TIMEOUT_MS / 1000}s each)`,
+                log,
+                emit
+              );
+              return;
+            }
+            log("verifier", "stderr", `✗ VERIFY FAILED (post-retry) — ${errorMsg(retryErr)}`);
+            nodeStatus("verifier", "error");
+            escalate(
+              taskId,
+              `Verifier failed on attempt ${attempt} (after salvage retry): ${errorMsg(retryErr)}`,
+              log,
+              emit
+            );
+            return;
+          }
+        } else {
+          log("verifier", "stderr", `✗ VERIFY FAILED — ${errorMsg(err)}`);
+          nodeStatus("verifier", "error");
+          escalate(
+            taskId,
+            `Verifier failed on attempt ${attempt}: ${errorMsg(err)}`,
+            log,
+            emit
+          );
+          return;
+        }
       }
 
       const { verdict } = parseStateDiff(stateAfterVerify);
@@ -1062,6 +1186,10 @@ try {
           verifier: `.loop/verifier-attempt-${attempt}-raw.md`,
         },
         validation: validationOutcome ?? undefined,
+        // ponytail: Task 1 watchdog events — only set when the watchdog
+        // actually fired this attempt (empty array still satisfies the
+        // WS payload but is omitted so old attempts don't gain the field).
+        stalls: stallsThisAttempt.length > 0 ? stallsThisAttempt : undefined,
         completedAt: new Date().toISOString(),
       });
 

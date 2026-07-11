@@ -125,8 +125,29 @@ export interface AttemptRecord {
     passed: boolean;
     errors: string[];
   };
+  /** Stall watchdog events for this attempt. The orchestrator adds one
+   *  entry per phase that crossed STALL_TIMEOUT_MS without producing any
+   *  output, plus its resolution. Optional + additive — old tasks /
+   *  attempts where the watchdog never fired carry no `stalls` field and
+   *  the UI must render as if it were an empty array. */
+  stalls?: StallRecord[];
   /** ISO timestamp when the attempt completed. */
   completedAt?: string;
+}
+
+/**
+ * One row in the per-attempt stall watchdog log. Appended each time a
+ * phase (planner / verifier / maker) crossed STALL_TIMEOUT_MS without
+ * producing any output, plus how the orchestrator resolved the stall.
+ */
+export interface StallRecord {
+  /** Which phase stalled: "planner" | "verifier" | "maker". */
+  phase: "planner" | "verifier" | "maker";
+  /** Wall-clock ms the watchdog waited before declaring the phase stalled. */
+  stalledAfterMs: number;
+  /** How the orchestrator resolved the stall. `escalated` means we hit the
+   *  one-re-invoke limit and gave up — task is stuck for real. */
+  resolution: "partial-output" | "reinvoke" | "escalated";
 }
 
 export interface LogEntry {

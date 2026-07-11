@@ -28,6 +28,42 @@ import {
   buildSpawnEnvOverride,
   providerKeyForConnection,
 } from "../store/connections.js";
+import { recordUsage } from "../store/tokenUsage.js";
+
+/**
+ * Bridge runner that bypasses the `opencode` CLI subprocess. Why this
+ * exists: opencode CLI 1.14.28 (bundled with mavis Code) sends a request
+ * body shape that NVIDIA / Zenmux openai-compatible endpoints reject with
+ * 404 (incompatible @ai-sdk/openai version inside the bundled binary).
+ * Until the CLI is upgraded we route phase agents through this minimal
+ * Node.js script that uses an `@ai-sdk/openai` version pinned to one that
+ * sends proper `/chat/completions` requests. The orchestrator's file
+ * watchers + WebSocket broadcast pipeline are unchanged.
+ *
+ * Agent → output file mapping (the script just writes the LLM's reply
+ * verbatim to the target file):
+ *   planner  → <workdir>/GOAL.md
+ *   maker    → <workdir>/index.html (LLM emits a single ```html ... ``` block)
+ *   verifier → <workdir>/STATE.md (LLM emits the `## Verifier Verdict` block)
+ *
+ * The system prompts tell the LLM what role it's playing and what to emit.
+ * Read by the watcher just like real agent output — no parser change.
+ */
+const LLM_AGENT_SCRIPT = pathResolve(
+  process.env.LOOP_LLM_AGENT_SCRIPT ??
+    `${process.cwd()}/llm-agent.mjs`,
+);
+// System prompts are loaded lazily inside llm-agent.mjs at runtime from
+// `<workdir>/.opencode/agents/loop-<role>.md` (with per-role tool-mode
+// overrides appended for the bridge runner). We don't precompute them here
+// because the orchestrator's spawnAgent() receives workdir per-call, not at
+// module load. Keeping this constant empty is intentional — leaving a
+// stub function here was confusing (it always returned "").
+const LLM_AGENT_OUTPUT_FILE: Record<AgentName, (workdir: string) => string> = {
+  planner: (workdir) => pathResolve(workdir, "GOAL.md"),
+  maker: (workdir) => pathResolve(workdir, "index.html"),
+  verifier: (workdir) => pathResolve(workdir, "STATE.md"),
+};
 
 export type AgentName = "planner" | "maker" | "verifier";
 
@@ -43,6 +79,21 @@ export interface AgentHandle {
   exited: Promise<number | null>;
   /** Send SIGTERM (or taskkill on Windows) to the agent. */
   kill(): void;
+  /**
+   * Wall-clock ms timestamp of the most recent stdout/stderr activity
+   * from this agent. Updated by the line buffer on every chunk. The
+   * orchestrator's stall watchdog compares this against Date.now() to
+   * detect a hung-but-alive process. For mock agents, set whenever the
+   * mock stream emits a line.
+   */
+  lastActivityAt: number;
+  /**
+   * Read-only handle for tests. Returns the most recent chunk of stdout
+   * captured so far (since spawn). Used by partial-output salvage to
+   * parse a verdict out of a stalled verifier's accumulated output.
+   * Empty for mock agents unless they expose a separate buffer.
+   */
+  getAccumulatedOutput?(): string;
 }
 
 type LineCallback = (line: string) => void;
@@ -78,6 +129,184 @@ const OPENCODE_AVAILABLE: boolean = (() => {
     return false;
   }
 })();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bridge runner — invokes `node llm-agent.mjs` instead of `opencode`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function spawnBridgeRunner(
+  agent: AgentName,
+  taskId: string,
+  workdir: string,
+  runPrompt: string,
+  onStdout: LineCallback,
+  onStderr: LineCallback,
+  onExit: ExitCallback,
+  options: SpawnAgentOptions | null,
+): AgentHandle {
+  const outFile = LLM_AGENT_OUTPUT_FILE[agent](workdir);
+  const connection = options?.connection ?? null;
+  // The picker model id is `custom:<connId>:<upstreamId>`. The bridge
+  // runner needs the raw upstream id (e.g. `z-ai/glm-5.2`). Strip the
+  // prefix to get it.
+  let upstreamModel = "z-ai/glm-5.2"; // safe fallback that works against NVIDIA NIM
+  const pickerModel = options?.model;
+  if (pickerModel && pickerModel.startsWith("custom:")) {
+    const parts = pickerModel.split(":");
+    if (parts.length >= 3) upstreamModel = parts.slice(2).join(":");
+  } else if (pickerModel) {
+    upstreamModel = pickerModel;
+  }
+  const baseUrl = connection?.baseUrl ?? "https://integrate.api.nvidia.com/v1";
+  const apiKey = connection?.apiKey ?? "";
+
+  const args: string[] = [
+    // NOTE: do NOT prepend LLM_AGENT_SCRIPT here. The script path is passed
+    // to spawn() as the executable's argv[1] (right after the node binary),
+    // and then this `args` array fills argv[2..]. If we also include the
+    // script path as the first element of `args`, the child sees the script
+    // path TWICE — once as argv[1] (correct, that's how Node loads the
+    // script) and once as argv[2] (a positional arg). llm-agent.mjs's
+    // parseArgs() then treats argv[2] as the user prompt (its default
+    // branch sets `out.prompt = a` for the first non-flag positional arg),
+    // overwriting the LOOP_USER_PROMPT env var that carries the real task
+    // description. Symptom: the LLM "receives only a file path" and
+    // ESCALATEs immediately.
+    "--model",
+    upstreamModel,
+    "--base-url",
+    baseUrl,
+    "--api-key",
+    apiKey,
+    "--workdir",
+    workdir,
+    "--role",
+    agent,
+    "--output",
+    outFile,
+    "--max-tokens",
+    // Verifier gets the same budget as the maker: GLM-class thinking models
+    // spend tokens on reasoning before emitting content, and at 4096 the
+    // verifier's reasoning exhausted the budget leaving content empty
+    // (observed: "LLM OK ... 0 chars" → "no Verdict section" escalation).
+    String(agent === "planner" ? 4096 : 8192),
+    "--temperature",
+    "0.7",
+  ];
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LOOP_TASK_ID: taskId,
+    LOOP_ROLE: agent,
+    LOOP_BRIDGE: "1",
+    // Routing metadata for the usage-capture channel. llm-agent.mjs
+    // reads these on completion to attribute token usage to the right
+    // model + connection (or null for curated models).
+    LOOP_MODEL_ID: options?.model ?? upstreamModel,
+    LOOP_CONNECTION_ID: connection?.id ?? "",
+    LOOP_CONNECTION_NAME: connection?.name ?? "",
+  };
+
+  let child: ChildProcess;
+  try {
+    // IMPORTANT: argv size limit on macOS is ~256KB. The system prompt +
+    // user prompt + task description easily exceed that on this path.
+    // We pass the long strings via env vars instead of argv so spawn
+    // doesn't blow up. llm-agent.mjs accepts --system / --prompt for
+    // short use; for this orchestrator we wire them through env.
+    const envWithPrompt: NodeJS.ProcessEnv = {
+      ...env,
+      // LOOP_SYSTEM_PROMPT intentionally left unset — llm-agent.mjs falls
+      // through to loading <workdir>/.opencode/agents/loop-<role>.md at
+      // runtime, then appends the per-role tool-mode override.
+      LOOP_USER_PROMPT: runPrompt,
+    };
+    child = spawn(process.execPath, [LLM_AGENT_SCRIPT, ...args], {
+      cwd: workdir,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: envWithPrompt,
+    });
+  } catch (err) {
+    queueMicrotask(() => onExit(null));
+    return makeFailedHandle(taskId, err);
+  }
+
+  if (!child.pid) {
+    queueMicrotask(() => onExit(null));
+    return makeFailedHandle(taskId, new Error("bridge spawn returned no pid"));
+  }
+
+  child.on("error", (err) => {
+    onStderr(`[bridge-spawn-error] ${err.message}`);
+    onExit(null);
+  });
+
+  // ponytail: shared liveness target updated by attachLineBuffer on every
+  // chunk; the returned handle's `lastActivityAt` reads from this same
+  // object so the orchestrator's stall watchdog sees live values.
+  const activityTarget = { lastActivityAt: Date.now() };
+  attachLineBuffer(child.stdout, onStdout, activityTarget);
+  // Stderr carries both human-readable diagnostic lines AND a structured
+  // token-usage line (`__LOOP_USAGE__:{json}__END__`). The capture
+  // wrapper routes the structured line into the usage store and forwards
+  // the rest to the caller's onStderr unchanged.
+  attachLineBuffer(child.stderr, wrapStderrForUsageCapture(onStderr), activityTarget);
+
+  const exited = new Promise<number | null>((resolve) => {
+    let resolved = false;
+    const resolveOnce = (code: number | null) => {
+      if (resolved) return;
+      resolved = true;
+      try {
+        onExit(code);
+      } catch {
+        /* caller bug — don't propagate */
+      }
+      resolve(code);
+    };
+    child.on("exit", (code, signal) => {
+      resolveOnce(signal ? null : code);
+    });
+  });
+
+  return {
+    pid: child.pid,
+    isMock: false,
+    exited,
+    get lastActivityAt() { return activityTarget.lastActivityAt; },
+    kill() {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+          stdio: "ignore",
+        });
+      } else {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch {
+          try {
+            process.kill(child.pid, "SIGTERM");
+          } catch {
+            /* already dead */
+          }
+        }
+        const killPid = child.pid;
+        setTimeout(() => {
+          try {
+            process.kill(-killPid, "SIGKILL");
+          } catch {
+            try {
+              process.kill(killPid, "SIGKILL");
+            } catch {
+              /* already dead */
+            }
+          }
+        }, 1500);
+      }
+    },
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -191,11 +420,38 @@ function spawnReal(
   options: SpawnAgentOptions | undefined
 ): AgentHandle {
   const absoluteWorkdir = pathResolve(workdir);
+
+  // Branch 1 — bridge runner: invoke `llm-agent.mjs` directly. This is the
+  // active path because the bundled `opencode` CLI's @ai-sdk/openai is
+  // incompatible with the NVIDIA NIM / Zenmux openai-compatible endpoints
+  // (sends to /v1/responses instead of /chat/completions, defaults to
+  // temperature=0). The bridge runner talks to the same provider's chat-
+  // completions endpoint with the right request shape, then writes the
+  // LLM reply to the file the orchestrator's watcher expects
+  // (GOAL.md / index.html / STATE.md). Same phase transitions as the
+  // real agent path.
+  if (process.env.LOOP_USE_LLM_BRIDGE !== "0") {
+    return spawnBridgeRunner(
+      agent,
+      taskId,
+      absoluteWorkdir,
+      runPrompt,
+      onStdout,
+      onStderr,
+      onExit,
+      options ?? null,
+    );
+  }
+
+  // Branch 2 — original opencode CLI subprocess (kept for the day the
+  // bundled CLI gets fixed or we upgrade opencode). Reachable by setting
+  // LOOP_USE_LLM_BRIDGE=0 in the backend env.
+  const override = buildSpawnEnvOverride(options?.model);
+
   // Translate picker-facing model id → opencode-facing one. For custom
   // connections, this rewrites `custom:<connId>:<upstreamId>` to
   // `loop-<connId>/<upstreamId>` so opencode routes through the provider
   // block we write to `.opencode.task.json` below.
-  const override = buildSpawnEnvOverride(options?.model);
   const modelForOpencode = override?.modelForOpencode ?? options?.model;
 
   // Build the argv. --model flag goes BEFORE the agent flag (opencode flag
@@ -297,8 +553,10 @@ function spawnReal(
     onExit(null);
   });
 
-  attachLineBuffer(child.stdout, onStdout);
-  attachLineBuffer(child.stderr, onStderr);
+  // ponytail: same liveness target as the bridge runner — see above.
+  const activityTarget = { lastActivityAt: Date.now() };
+  attachLineBuffer(child.stdout, onStdout, activityTarget);
+  attachLineBuffer(child.stderr, onStderr, activityTarget);
 
   const exited = new Promise<number | null>((resolve) => {
     let resolved = false;
@@ -329,6 +587,7 @@ function spawnReal(
     pid: child.pid,
     isMock: false,
     exited,
+    get lastActivityAt() { return activityTarget.lastActivityAt; },
     kill() {
       if (!child.pid) return;
       if (process.platform === "win32") {
@@ -371,12 +630,18 @@ function spawnReal(
 
 function attachLineBuffer(
   stream: NodeJS.ReadableStream | null,
-  onLine: LineCallback
+  onLine: LineCallback,
+  activityTarget: { lastActivityAt: number }
 ): void {
   if (!stream) return;
   let buffer = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk: string) => {
+    // ponytail: every chunk of agent output is a liveness signal — the
+    // orchestrator's stall watchdog polls `activityTarget.lastActivityAt`
+    // to detect a hung-but-alive process. Cheap (one Date.now call) and
+    // covers both stdout AND stderr (where token-usage lines land).
+    activityTarget.lastActivityAt = Date.now();
     buffer += chunk;
     let nlIdx = buffer.indexOf("\n");
     while (nlIdx >= 0) {
@@ -394,15 +659,118 @@ function attachLineBuffer(
   });
 }
 
+/**
+ * Wrap a stderr line callback so structured token-usage lines written by
+ * the bridge runner are routed into the usage store instead of the UI log.
+ * Format: `__LOOP_USAGE__:{json}__END__`. The wrapper is defensive —
+ * malformed payloads (no terminator, bad JSON) are forwarded to the
+ * original callback so the user can still see them in the log strip.
+ *
+ * Buffering: a single payload is expected to land on a single line, but
+ * if a chunk boundary splits the `__END__` we still parse the start.
+ * Worst case we lose one usage record and log a warning.
+ */
+function wrapStderrForUsageCapture(
+  downstream: LineCallback
+): LineCallback {
+  return (line: string) => {
+    const startIdx = line.indexOf("__LOOP_USAGE__:");
+    if (startIdx === -1) {
+      downstream(line);
+      return;
+    }
+    const afterPrefix = line.slice(startIdx + "__LOOP_USAGE__:".length);
+    const endIdx = afterPrefix.indexOf("__END__");
+    if (endIdx === -1) {
+      // Partial line — let it through unmodified. The next line is
+      // unlikely to also start with this prefix; if it does, we'll
+      // silently drop the second one to avoid double-counting.
+      downstream(line);
+      return;
+    }
+    const json = afterPrefix.slice(0, endIdx);
+    try {
+      const payload = JSON.parse(json) as {
+        modelId?: string;
+        upstreamModel?: string;
+        connectionId?: string | null;
+        connectionName?: string | null;
+        baseUrl?: string | null;
+        promptTokens?: number;
+        completionTokens?: number;
+      };
+      const prompt = Number(payload.promptTokens ?? 0);
+      const completion = Number(payload.completionTokens ?? 0);
+      if (prompt <= 0 && completion <= 0) {
+        // No usage to record; still swallow the line so the UI log
+        // doesn't show a JSON blob the user can't parse.
+        return;
+      }
+      recordUsage({
+        modelId: payload.modelId ?? payload.upstreamModel ?? "unknown",
+        upstreamModel: payload.upstreamModel ?? payload.modelId ?? "unknown",
+        connectionId: payload.connectionId || null,
+        connectionName: payload.connectionName || null,
+        baseUrl: payload.baseUrl || null,
+        promptTokens: prompt,
+        completionTokens: completion,
+      });
+    } catch (err) {
+      // Malformed JSON — forward to the UI log so the user can see it
+      // (and we keep parity with how a non-structured line is treated).
+      downstream(`[usage-parse] failed to parse usage line: ${
+        err instanceof Error ? err.message : String(err)
+      } — raw: ${line}`);
+    }
+  };
+}
+
 function makeFailedHandle(taskId: string, _err: unknown): AgentHandle {
   return {
     pid: -1,
     isMock: false,
     exited: Promise.resolve(null),
+    lastActivityAt: Date.now(),
     kill() {
       AGENT_HANDLES.delete(taskId);
     },
   };
+}
+
+/**
+ * Emit a synthetic __LOOP_USAGE__ line from the mock agent. Numbers are
+ * derived deterministically from the agent + model id so the user sees
+ * distinct "models" producing different token counts in the dev UI.
+ */
+function emitMockUsageLine(
+  onStderr: LineCallback,
+  model: string | undefined,
+  connection: Connection | null
+): void {
+  const fallback = "mock-default";
+  const upstreamModel = model ?? fallback;
+  // Distinct rough per-call shapes so different models accumulate
+  // different totals in the panel.
+  const profile = modelProfile(upstreamModel);
+  const baseByAgent = profile.label === "claude"
+    ? { prompt: 1200, completion: 380 }
+    : profile.label === "gpt"
+    ? { prompt: 1500, completion: 520 }
+    : profile.label === "gemini"
+    ? { prompt: 1100, completion: 410 }
+    : profile.label === "local"
+    ? { prompt: 950, completion: 280 }
+    : { prompt: 1300, completion: 440 };
+  const payload = {
+    modelId: connection ? `custom:${connection.id}:${upstreamModel}` : upstreamModel,
+    upstreamModel,
+    connectionId: connection?.id ?? null,
+    connectionName: connection?.name ?? null,
+    baseUrl: connection?.baseUrl ?? null,
+    promptTokens: baseByAgent.prompt,
+    completionTokens: baseByAgent.completion,
+  };
+  onStderr(`__LOOP_USAGE__:${JSON.stringify(payload)}__END__`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -430,6 +798,22 @@ function spawnMock(
   const pid = mockPid();
   const absoluteWorkdir = pathResolve(workdir);
   const attempt = parseAttempt(runPrompt) ?? 1;
+
+  // ponytail: mock agents run on a setTimeout chain with `stepDelayMs`
+  // gaps. Each onStdout/onStderr call IS a liveness event, so wrap them
+  // to update lastActivityAt — the orchestrator's stall watchdog stays
+  // satisfied during normal mock flow and only fires on a real hang.
+  const activityTarget = { lastActivityAt: Date.now() };
+  const origStdout = onStdout;
+  const origStderr = onStderr;
+  onStdout = (line) => {
+    activityTarget.lastActivityAt = Date.now();
+    origStdout(line);
+  };
+  onStderr = (line) => {
+    activityTarget.lastActivityAt = Date.now();
+    origStderr(line);
+  };
   const title = parseTaskTitle(runPrompt) ?? "the task";
 
   // Resolve the routing override so the mock can show the user exactly
@@ -502,6 +886,15 @@ function spawnMock(
       }
       onStdout(`[mock-agent] wrote ${writeResult.path}`);
 
+      // Emit a synthetic usage line so the dev-time token counter has
+      // something to show. Real LLM calls go through llm-agent.mjs and
+      // emit the same `__LOOP_USAGE__:{json}__END__` format.
+      emitMockUsageLine(
+        onStderr,
+        options?.model,
+        options?.connection ?? null
+      );
+
       await streamDone(agent, profile, onStdout, isKilled);
       if (killed) return deliverExit(null);
 
@@ -518,6 +911,7 @@ function spawnMock(
     pid,
     isMock: true,
     exited,
+    get lastActivityAt() { return activityTarget.lastActivityAt; },
     kill() {
       killed = true;
       deliverExit(null);
