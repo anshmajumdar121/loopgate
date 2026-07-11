@@ -25,6 +25,7 @@
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { spawn } from "node:child_process";
+import { parse as parseHtml } from "parse5";
 
 export interface ValidationResult {
   passed: boolean;
@@ -127,11 +128,19 @@ export async function runValidation(
         // for keeping validation a zero-dep step.
         const err = await checkJsSyntax(workdir, f.path);
         if (err) errors.push(err);
+      } else if (ext === ".html" || ext === ".htm") {
+        // HTML gate (Task 2 of 2026-07-11-loop-resilience-and-real-build).
+        // parse5 is spec-forgiving, so only ERROR-severity structural
+        // problems fail here — benign quirks (missing doctype, unquoted
+        // attrs, implied </p>) pass. Real HTML/CSS *behavior* issues are
+        // still the headless-browser runtime check's job downstream.
+        const errs = await checkHtmlSyntax(workdir, f.path);
+        errors.push(...errs);
       }
-      // HTML / CSS / images / etc. — no cheap zero-dep parser; the
-      // headless-browser runtime check downstream catches real
-      // HTML/CSS errors. The no-op guard (gate a) is the
-      // high-signal one for v1.
+      // CSS / images / etc. — no cheap parser worth the false-positive
+      // risk; the headless-browser runtime check downstream catches
+      // real CSS errors. The no-op guard (gate a) is the high-signal
+      // one for those.
     }
   }
 
@@ -182,4 +191,111 @@ async function checkJsSyntax(
       }
     });
   });
+}
+
+// ─── HTML syntax gate (Task 2, 2026-07-11-loop-resilience-and-real-build) ──
+//
+// Two error classes, both genuinely structural:
+//   1. Fatal tokenizer errors — unterminated tags/attributes/comments/
+//      doctypes (parse5 `eof-in-*` / `unexpected-eof` codes). These mean
+//      the file was truncated or the maker emitted broken markup.
+//   2. Unclosed non-omittable elements — the HTML spec forgives unclosed
+//      <p>/<li>/<td>… (their end tags are omittable), so parse5 reports
+//      NO error for a dangling <div>. We walk the location-annotated tree
+//      instead: an HTML-namespace element with a startTag location but no
+//      endTag location, that is neither void nor omittable, is unclosed.
+//
+// Everything else parse5 reports (missing-doctype, duplicate-attribute,
+// unquoted attrs, implied closes) is a benign quirk browsers handle —
+// flagging those would cause false-positive REJECT loops.
+
+/** End tags the HTML spec allows omitting — never flag these as unclosed. */
+const OMITTABLE_END_TAGS = new Set([
+  "html", "head", "body", "p", "li", "dt", "dd", "rt", "rp",
+  "optgroup", "option", "colgroup", "caption", "thead", "tbody",
+  "tfoot", "tr", "td", "th",
+]);
+
+/** Void elements — no end tag exists by definition. */
+const VOID_ELEMENTS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input",
+  "link", "meta", "param", "source", "track", "wbr",
+]);
+
+/** Fatal tokenizer error codes: markup that is truncated/unterminated. */
+const FATAL_HTML_ERROR_CODES = /^(eof-|unexpected-eof)/;
+
+/**
+ * Parse an HTML file with parse5 and return ERROR-severity structural
+ * problems only (empty array = pass). Exported for tests. Best-effort:
+ * any unexpected parser failure resolves to a pass, mirroring
+ * checkJsSyntax's stance — the runtime check downstream is the backstop.
+ */
+export async function checkHtmlSyntax(
+  workdir: string,
+  relPath: string
+): Promise<string[]> {
+  let source: string;
+  try {
+    source = await readFile(join(workdir, relPath), "utf8");
+  } catch {
+    return []; // claimed in the diff but missing on disk — gate (a) territory
+  }
+  try {
+    const errors: string[] = [];
+    const doc = parseHtml(source, {
+      sourceCodeLocationInfo: true,
+      onParseError: (err) => {
+        if (FATAL_HTML_ERROR_CODES.test(err.code)) {
+          errors.push(
+            `validation: HTML error in ${relPath}:${err.startLine}: ${err.code}`
+          );
+        }
+      },
+    });
+    collectUnclosedElements(doc as unknown as WalkableNode, relPath, errors);
+    return errors.slice(0, 10); // bound the feedback size
+  } catch {
+    return []; // parser blew up — don't block the loop on our own tooling
+  }
+}
+
+/** Minimal structural view of a parse5 node — enough for the walk. */
+interface WalkableNode {
+  tagName?: string;
+  namespaceURI?: string;
+  sourceCodeLocation?: { startTag?: { startLine: number }; endTag?: unknown } | null;
+  childNodes?: unknown[];
+  content?: unknown;
+}
+
+/**
+ * Recursively find HTML-namespace elements whose start tag appears in the
+ * source but whose end tag does not (and isn't void/omittable).
+ */
+function collectUnclosedElements(
+  node: WalkableNode,
+  relPath: string,
+  out: string[]
+): void {
+  if (
+    node.tagName &&
+    (!node.namespaceURI || node.namespaceURI.includes("xhtml")) &&
+    !VOID_ELEMENTS.has(node.tagName) &&
+    !OMITTABLE_END_TAGS.has(node.tagName)
+  ) {
+    const loc = node.sourceCodeLocation;
+    if (loc && loc.startTag && !loc.endTag) {
+      out.push(
+        `validation: HTML error in ${relPath}:${loc.startTag.startLine}: unclosed <${node.tagName}> (end tag missing and not omittable)`
+      );
+    }
+  }
+  for (const child of node.childNodes ?? []) {
+    collectUnclosedElements(child as WalkableNode, relPath, out);
+  }
+  // <template> children live under .content
+  if (node.content) {
+    collectUnclosedElements(node.content as WalkableNode, relPath, out);
+  }
 }
