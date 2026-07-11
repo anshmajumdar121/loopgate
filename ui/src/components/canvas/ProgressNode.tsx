@@ -535,6 +535,24 @@ function StepDetail({
           }
         />
         <Row label="Risk" value={verdict.risk} />
+        {verdict.criteriaWalk.length > 0 && (
+          <li className="mt-1 space-y-0.5">
+            {verdict.criteriaWalk.map((c, i) => (
+              <div
+                key={i}
+                style={{ display: "flex", gap: 4, alignItems: "flex-start", fontSize: 10 }}
+                title={c.evidence}
+              >
+                <span style={{ color: c.passed ? "#3fb950" : "#f85149", flexShrink: 0 }}>
+                  {c.passed ? "✓" : "✗"}
+                </span>
+                <span className="text-zinc-500 dark:text-zinc-400" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.criterion}
+                </span>
+              </div>
+            ))}
+          </li>
+        )}
       </ul>
     );
   }
