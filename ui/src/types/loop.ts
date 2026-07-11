@@ -106,11 +106,55 @@ export interface Task {
     consoleErrorCount: number;
     screenshotRelPath: string | null;
   };
+  /** Set at task creation; if true, the orchestrator skips the plan_review
+   *  user gate and proceeds straight to implementation. Mirrors
+   *  backend/src/types.ts Task.autoApprovePlan. */
+  autoApprovePlan?: boolean;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
   projectId?: string;
   sessionId?: string;
+  /** Per-attempt timeline. One record per implement→verify cycle,
+   *  populated by the orchestrator at the end of each cycle. Mirrors
+   *  backend/src/types.ts Task.attempts + AttemptRecord. Optional +
+   *  additive — tasks created before this field existed load with
+   *  attempts: undefined and the UI renders nothing for them. */
+  attempts?: AttemptRecord[];
+}
+
+/**
+ * Per-attempt timeline row. Mirrors backend/src/types.ts AttemptRecord.
+ * Every field is optional because the orchestrator may not reach every
+ * phase (e.g. a maker crash skips runtime + verify). The UI renders
+ * gracefully when most fields are missing — see AttemptTimeline.tsx.
+ */
+export interface AttemptRecord {
+  attemptNumber: number;
+  makerMs?: number;
+  runtimeCheckMs?: number;
+  verifierMs?: number;
+  filesChanged?: { path: string; reason: string }[];
+  runtimeResult?: {
+    passed: boolean;
+    consoleErrorCount: number;
+    pageErrorCount: number;
+    screenshotRelPath: string | null;
+  };
+  verifierVerdict?: "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
+  rejectReason?: string;
+  artifactPaths?: {
+    maker?: string;
+    runtimeJson?: string;
+    runtimePng?: string;
+    verifier?: string;
+  };
+  stuckDetected?: boolean;
+  validation?: {
+    passed: boolean;
+    errors: string[];
+  };
+  completedAt?: string;
 }
 
 /**

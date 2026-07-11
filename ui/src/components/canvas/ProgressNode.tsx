@@ -31,6 +31,7 @@ import type {
 } from "@/types/loop";
 import { PreviewLinkChip } from "@/components/PreviewLinkChip";
 import { RuntimeCheckPanel } from "@/components/RuntimeCheckPanel";
+import { AttemptTimeline } from "@/components/AttemptTimeline";
 
 interface ProgressNodeData extends Record<string, unknown> {
   spec: {
@@ -289,6 +290,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
         </span>
         <PreviewLinkChip url={task?.previewUrl} />
         <RuntimeCheckPanel task={task} />
+        <AttemptTimeline task={task} />
       </div>
 
       {/* Step list — Image 2/3's numbered, always-expanded rows.
