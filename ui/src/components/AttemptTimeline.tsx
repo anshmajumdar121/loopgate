@@ -195,6 +195,43 @@ function AttemptCard({ attempt, task }: { attempt: AttemptRecord; task?: Task | 
           </div>
         )}
 
+        {/* Build/test stage results (Task 3: project-shaped workdirs
+            only — static tasks never carry buildRun, so this renders
+            nothing for them). */}
+        {attempt.buildRun && (
+          <div className="space-y-0.5 text-[10px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  attempt.buildRun.failedStage
+                    ? "font-semibold text-rose-700 dark:text-rose-300"
+                    : "font-semibold text-emerald-700 dark:text-emerald-300"
+                }
+              >
+                {attempt.buildRun.failedStage
+                  ? `● build failed (${attempt.buildRun.failedStage})`
+                  : "● build ok"}
+              </span>
+              <span className="text-zinc-500 dark:text-zinc-400">
+                {attempt.buildRun.installMs !== undefined &&
+                  `install ${formatDuration(attempt.buildRun.installMs)} · `}
+                {attempt.buildRun.buildExit !== undefined &&
+                  `build exit ${attempt.buildRun.buildExit}`}
+                {attempt.buildRun.testExit !== undefined &&
+                  ` · test exit ${attempt.buildRun.testExit}`}
+              </span>
+            </div>
+            {attempt.buildRun.failedStage && attempt.buildRun.outputTail && (
+              <pre
+                className="max-h-24 overflow-auto rounded bg-zinc-100 p-1 font-mono text-[9px] leading-tight text-zinc-600 dark:bg-zinc-900/60 dark:text-zinc-300"
+                title="Last lines of the failed stage's output"
+              >
+                {attempt.buildRun.outputTail.split("\n").slice(-12).join("\n")}
+              </pre>
+            )}
+          </div>
+        )}
+
         {/* Verifier reason — the verdict.oneLineReason. Read-only text,
             full text on hover if it's long. */}
         {attempt.rejectReason && (

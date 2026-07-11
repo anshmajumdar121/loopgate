@@ -131,8 +131,28 @@ export interface AttemptRecord {
    *  attempts where the watchdog never fired carry no `stalls` field and
    *  the UI must render as if it were an empty array. */
   stalls?: StallRecord[];
+  /** Build/test execution results for project-shaped workdirs (Task 3 of
+   *  2026-07-11-loop-resilience-and-real-build). Present only when the
+   *  workdir contained a package.json and the build step ran. Static
+   *  prototypes never carry this field. */
+  buildRun?: BuildRunRecord;
   /** ISO timestamp when the attempt completed. */
   completedAt?: string;
+}
+
+/**
+ * Per-attempt build/test stage results. Mirrors the shape produced by
+ * loop/build-runner.ts BuildRunResult minus outputDir (a server-local
+ * absolute path the UI has no use for). Optional + additive.
+ */
+export interface BuildRunRecord {
+  installMs?: number;
+  buildMs?: number;
+  testMs?: number;
+  buildExit?: number;
+  testExit?: number;
+  failedStage?: "install" | "build" | "test";
+  outputTail?: string;
 }
 
 /**

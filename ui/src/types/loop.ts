@@ -157,7 +157,24 @@ export interface AttemptRecord {
   /** Stall watchdog events for this attempt. Mirrors
    *  backend/src/types.ts AttemptRecord.stalls. */
   stalls?: StallRecord[];
+  /** Build/test stage results. Mirrors backend/src/types.ts
+   *  BuildRunRecord. Present only for project-shaped workdirs. */
+  buildRun?: BuildRunRecord;
   completedAt?: string;
+}
+
+/**
+ * Per-attempt build/test stage results. Mirrors backend/src/types.ts
+ * BuildRunRecord. Optional + additive.
+ */
+export interface BuildRunRecord {
+  installMs?: number;
+  buildMs?: number;
+  testMs?: number;
+  buildExit?: number;
+  testExit?: number;
+  failedStage?: "install" | "build" | "test";
+  outputTail?: string;
 }
 
 /**

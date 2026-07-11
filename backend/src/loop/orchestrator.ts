@@ -54,6 +54,7 @@ import {
 } from "./preview-server.js";
 import { runRuntimeCheck, type RuntimeCheckResult } from "./runtime-check.js";
 import { runValidation } from "./validation.js";
+import { runBuildStep, type BuildRunResult } from "./build-runner.js";
 import type { AttemptRecord, VerdictOutcome } from "../types.js";
 import { resolveConnectionModel } from "../store/connections.js";
 import { readFile } from "node:fs/promises";
@@ -767,6 +768,10 @@ try {
       // Validation outcome for the per-attempt timeline (set inside the
       // maker block when the pre-runtime gate runs).
       let validationOutcome: { passed: boolean; errors: string[] } | null = null;
+      // Build/test results for project-shaped workdirs (Task 3). Reset
+      // inside the attempt body right before runBuildStep; declared here
+      // so the post-verdict AttemptRecord append can read it.
+      let buildRun: BuildRunResult | undefined;
       // Stall events for this attempt (Task 1 of
       // 2026-07-11-loop-resilience-and-real-build). Pushed by the
       // verifier (and later planner) watchdog blocks; read at append
@@ -999,6 +1004,72 @@ try {
         // validation.passed: log success and fall through to runtime check.
         log("orchestrator", "info", "✓ VALIDATION — passed");
 
+        // ─── Build/test step for project-shaped workdirs (Task 3 of
+        // 2026-07-11-loop-resilience-and-real-build). Static workdirs
+        // (no package.json) return undefined and this block is a no-op —
+        // the pipeline below runs byte-identically to before. On a
+        // failed stage we short-circuit exactly like a validation
+        // failure: record the attempt, feed the output tail back to the
+        // next maker, skip runtime + verifier.
+        buildRun = undefined;
+        try {
+          buildRun = await runBuildStep(initialTask.workdir, (line) =>
+            log("orchestrator", "info", line)
+          );
+        } catch (err) {
+          // Best-effort: a build-runner crash must never take down the
+          // static path. Log and continue as if no build step existed.
+          log("orchestrator", "stderr", `build-runner crashed (ignored): ${errorMsg(err)}`);
+        }
+        if (buildRun?.failedStage) {
+          log(
+            "orchestrator",
+            "stderr",
+            `✗ BUILD — ${buildRun.failedStage} stage failed${
+              buildRun.buildExit !== undefined ? ` (exit ${buildRun.buildExit})` : ""
+            }`
+          );
+          appendAttemptRecord(taskId, attempt, {
+            makerMs:
+              makerEndMs && makerStartMs ? makerEndMs - makerStartMs : undefined,
+            filesChanged: diff.filesChanged,
+            runtimeResult: undefined,
+            verifierVerdict: undefined,
+            rejectReason: `build ${buildRun.failedStage} stage failed`,
+            artifactPaths: {
+              maker: `.loop/maker-attempt-${attempt}-raw.md`,
+              runtimeJson: `.loop/runtime-attempt-${attempt}.json`,
+              runtimePng: `.loop/runtime-attempt-${attempt}.png`,
+              verifier: `.loop/verifier-attempt-${attempt}-raw.md`,
+            },
+            buildRun: toBuildRunRecord(buildRun),
+            completedAt: new Date().toISOString(),
+          });
+          LAST_FEEDBACK.set(
+            taskId,
+            `BUILD FAILED on your previous attempt (${buildRun.failedStage} stage):\n${
+              buildRun.outputTail ?? "(no output captured)"
+            }\n\nFix these issues and try again.`
+          );
+          log("orchestrator", "info", "▶ auto-continue triggered (build fail)");
+          continue;
+        }
+        if (buildRun) {
+          // Real exit codes replace the maker-reported (often mocked)
+          // diff fields — extend meaning, never rename.
+          if (buildRun.buildExit !== undefined) diff.buildExit = buildRun.buildExit;
+          updateTask(taskId, { diff });
+          log(
+            "orchestrator",
+            "info",
+            `✓ BUILD — install ${buildRun.installMs ?? 0}ms, build exit ${
+              buildRun.buildExit ?? "n/a"
+            }, test exit ${buildRun.testExit ?? "n/a"}${
+              buildRun.outputDir ? ` — serving built output` : ""
+            }`
+          );
+        }
+
         // ─── Runtime check: serve the workdir and actually RUN the prototype.
         // The verifier gets this evidence verbatim; a broken page can no
         // longer be APPROVEd on source-reading alone. `runtime` is reused
@@ -1012,7 +1083,13 @@ try {
           // the counter goes up, and we log + re-broadcast so the UI
           // shows the live link again instead of pointing at a dead port.
           const bindsBefore = getPreviewServerBindCount();
-          const previewUrl = await registerPreview(taskId, initialTask.workdir);
+          // Project-shaped tasks with a successful build serve the BUILT
+          // output; static tasks keep the exact current registration
+          // (Task 3 — locked default path).
+          const previewUrl = await registerPreview(
+            taskId,
+            buildRun?.outputDir ?? initialTask.workdir
+          );
           if (getPreviewServerBindCount() > bindsBefore) {
             log(
               "orchestrator",
@@ -1235,6 +1312,9 @@ try {
         // actually fired this attempt (empty array still satisfies the
         // WS payload but is omitted so old attempts don't gain the field).
         stalls: stallsThisAttempt.length > 0 ? stallsThisAttempt : undefined,
+        // Task 3: build/test stage results — only for project-shaped
+        // workdirs; static tasks never gain the field.
+        buildRun: buildRun ? toBuildRunRecord(buildRun) : undefined,
         completedAt: new Date().toISOString(),
       });
 
@@ -1892,6 +1972,24 @@ function appendAttemptRecord(
     attempts: [...filtered, next].sort((a, b) => a.attemptNumber - b.attemptNumber),
   });
   // updateTask's task_update broadcast already covers WS subscribers.
+}
+
+/**
+ * Strip build-runner internals (outputDir is a server-local absolute
+ * path) down to the persisted/broadcast BuildRunRecord shape (Task 3).
+ */
+function toBuildRunRecord(
+  run: BuildRunResult
+): NonNullable<AttemptRecord["buildRun"]> {
+  return {
+    installMs: run.installMs,
+    buildMs: run.buildMs,
+    testMs: run.testMs,
+    buildExit: run.buildExit,
+    testExit: run.testExit,
+    failedStage: run.failedStage,
+    outputTail: run.outputTail,
+  };
 }
 
 /**
