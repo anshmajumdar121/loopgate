@@ -32,10 +32,13 @@ export interface DiffFileChange {
 export interface DiffSummary {
   attempt: number;
   filesChanged: DiffFileChange[];
-  buildExit: number;
+  /** Exit code parsed from the maker's **Build:** line. `null` when the
+   *  maker didn't state one (e.g. "n/a — static files") — display "n/a",
+   *  never NaN. */
+  buildExit: number | null;
   testsPassed: number;
   testsFailed: number;
-  testsLintExit: number;
+  testsLintExit: number | null;
   notes: string;
 }
 
@@ -43,6 +46,14 @@ export interface CriteriaWalkItem {
   criterion: string;
   passed: boolean;
   evidence: string;
+  /**
+   * Which canvas node primarily drove this criterion. Optional — the parser
+   * fills it from an explicit `[node: planner]` / `[planner]` / `[maker]` /
+   * `[verifier]` tag in the criteria walk text, or via a default F1–F2 →
+   * planner / F3–F7 → maker heuristic when no tag is present. Used to drive
+   * per-node score badges on the workflow canvas.
+   */
+  nodeId?: "planner" | "maker" | "verifier" | string;
 }
 
 export type VerdictOutcome = "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
@@ -50,7 +61,7 @@ export type VerdictOutcome = "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
 export interface Verdict {
   attempt: number;
   outcome: VerdictOutcome;
-  buildExit: number;
+  buildExit: number | null;
   testsPassed: number;
   testsFailed: number;
   scopePass: boolean;
@@ -101,6 +112,13 @@ export interface AttemptRecord {
   };
   /** Verifier outcome for this attempt. */
   verifierVerdict?: VerdictOutcome;
+  /** Number of `**Criteria walk:**` checkboxes that passed for this
+   *  attempt. Populated at append time from
+   *  `verdict.criteriaWalk.filter(c => c.passed).length`. Used by the
+   *  orchestrator's best-so-far return when maxAttempts is hit and no
+   *  attempt APPROVEd. Undefined for attempts that did not reach the
+   *  verifier (e.g. build/runtime short-circuits). */
+  score?: number;
   /** The verifier's stated reason (filled from Verdict.oneLineReason for
    *  REJECT, from Verdict.oneLineReason for APPROVE, and the synthetic
    *  reason for ESCALATE_HUMAN). */
@@ -317,11 +335,52 @@ export type WsServerMessage =
   | { type: "plan_ready"; taskId: string; plan: PlanSummary }
   | { type: "diff_ready"; taskId: string; diff: DiffSummary }
   | { type: "verdict"; taskId: string; verdict: Verdict }
+  // Live verifier progress: broadcast each time the verifier's streaming
+  // response adds new `**Criteria walk:**` lines to STATE.md. The UI
+  // uses this to show a running X/Y PASS counter instead of waiting for
+  // the final verdict. `partial` is the criteria walk parsed from
+  // STATE.md at the moment of the broadcast — it can shrink if the LLM
+  // edits earlier lines via a re-emit, so the UI must take the latest
+  // event as authoritative. `done` flips true when the verifier exits;
+  // the UI should freeze the display.
+  | {
+      type: "verifier_progress";
+      taskId: string;
+      attempt: number;
+      passed: number;
+      total: number;
+      partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+      done: boolean;
+    }
+  // Per-node score breakdown: which canvas node earned what fraction of
+  // the criteria walk. Emitted alongside `verifier_progress` (same cadence)
+  // so the canvas can show a small /10 badge on the Planner / Maker /
+  // Verifier nodes that contributed. `nodeId` matches a canvas node id
+  // ("planner" / "maker" / "verifier"); the UI hides badges for unknown
+  // ids so future nodes don't accidentally render an empty chip.
+  | {
+      type: "node_score";
+      taskId: string;
+      attempt: number;
+      nodeId: string;
+      passed: number;
+      total: number;
+      score: number; // 0–10, matches scaleScoreOutOf10(passed, total)
+      done: boolean;
+    }
   | { type: "escalation"; taskId: string; reason: string }
   | { type: "done"; taskId: string; summary: string }
   | { type: "error"; taskId: string; message: string }
   | { type: "task_re_prompted"; taskId: string; prompt: string; attempt: number }
-  | { type: "task_deleted"; taskId: string };
+  | { type: "task_deleted"; taskId: string }
+  // Broadcast to ALL sockets (not task-scoped) whenever a connection's
+  // automated health status changes. `taskId` is absent by design — the
+  // Connections panel listens for these regardless of task subscription.
+  | {
+      type: "connection_health";
+      connectionId: string;
+      health: ConnectionHealth;
+    };
 
 // ----
 // REST request bodies
@@ -442,8 +501,23 @@ export interface Connection {
   /** Legacy multi-model form. Rendered as separate picker entries when
    *  `model` is absent. */
   models?: ConnectionModel[];
+  /** Latest automated health-check result (see loop/connection-health.ts).
+   *  Optional + additive — connections persisted before this field existed
+   *  load unchanged and render as "never checked". */
+  health?: ConnectionHealth;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Result of the most recent health check against a connection's endpoint.
+ *  Written by the background monitor (startup sweep + interval + on
+ *  create/update) and by the orchestrator's pre-flight re-test. */
+export interface ConnectionHealth {
+  ok: boolean;
+  latencyMs?: number;
+  error?: string;
+  /** ISO-8601 timestamp of when the check ran. */
+  checkedAt: string;
 }
 
 /** Wire shape returned by GET /api/connections — same as Connection but

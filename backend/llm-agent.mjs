@@ -19,7 +19,7 @@
 //
 // Exit 0 on success, 1 on error. Errors go to stderr.
 
-import { generateText } from "ai";
+import { generateText, streamText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { readFile, writeFile, appendFile, rename } from "node:fs/promises";
 
@@ -244,21 +244,75 @@ messages.push({ role: "user", content: userPrompt });
 
 try {
   const t0 = Date.now();
-  const result = await generateText({
-    model: openai(args.model),
-    messages,
-    temperature: args.temperature ?? 0.7,
-    maxTokens:
-      args.maxTokens ?? (args.role === "maker" ? 8192 : 4096),
-  });
+  // Verifier streams its response chunk-by-chunk into STATE.md so the
+  // orchestrator can parse a live `**Criteria walk:**` section and the
+  // UI can render a real-time X/Y PASS counter as the LLM grades each
+  // criterion. Planner + maker still use generateText (no live signal
+  // needed for those phases).
+  let result;
+  let text = "";
+  if (args.role === "verifier") {
+    // Scaffold STATE.md before streaming so the first chunk appends to
+    // a real file. The stream itself doesn't write the scaffold — it
+    // just appends chunks. This mirrors the non-streaming path.
+    const verifierStatePath = args.output;
+    try {
+      const { stat } = await import("node:fs/promises");
+      await stat(verifierStatePath);
+    } catch {
+      const { stat: _, ...rest } = await import("node:fs/promises");
+      const attempt = process.env.LOOP_ATTEMPT ?? "1";
+      const scaffold =
+        `# Loop State\n\n## Attempt: ${attempt} / ${process.env.LOOP_MAX_ATTEMPTS ?? "3"}\n\n`;
+      await writeFile(verifierStatePath, scaffold, "utf8");
+    }
+    // Leading newline so the verdict starts on its own line (the LLM
+    // sometimes returns a leading blank or no newline). The first
+    // chunk gets a "\n" prefix; later chunks append verbatim.
+    let firstChunk = true;
+    const stream = streamText({
+      model: openai(args.model),
+      messages,
+      temperature: args.temperature ?? 0.7,
+      maxTokens: args.maxTokens ?? 4096,
+    });
+    for await (const chunk of stream.textStream) {
+      text += chunk;
+      const out = firstChunk
+        ? (chunk.startsWith("\n") ? chunk : "\n" + chunk)
+        : chunk;
+      firstChunk = false;
+      try {
+        await appendFile(verifierStatePath, out, "utf8");
+      } catch {
+        // Append failures are non-fatal; the LLM might still produce
+        // a usable final state. Orchestrator will surface "no verdict
+        // section" if the parse fails.
+      }
+    }
+    // After the stream completes, pull usage / reasoning from the
+    // result. streamText's result shape mirrors generateText.
+    result = await stream;
+    process.stderr.write(
+      `[verifier] LLM OK in ${Date.now() - t0}ms (streamed), ${text.length} chars\n`
+    );
+  } else {
+    result = await generateText({
+      model: openai(args.model),
+      messages,
+      temperature: args.temperature ?? 0.7,
+      maxTokens:
+        args.maxTokens ?? (args.role === "maker" ? 8192 : 4096),
+    });
+    text = result.text ?? "";
+    process.stderr.write(
+      `[${args.role}] LLM OK in ${Date.now() - t0}ms, ${text.length} chars ` +
+        `(finish=${result.finishReason ?? "?"}, reasoning=${(result.reasoning ?? "").length} chars)\n`
+    );
+  }
   const { usage, finishReason } = result;
   const reasoning =
     typeof result.reasoning === "string" ? result.reasoning : "";
-  let text = result.text ?? "";
-  process.stderr.write(
-    `[${args.role}] LLM OK in ${Date.now() - t0}ms, ${text.length} chars ` +
-      `(finish=${finishReason ?? "?"}, reasoning=${reasoning.length} chars)\n`
-  );
 
   // Thinking models (GLM et al.) can return an EMPTY content field: either
   // the token budget was exhausted mid-reasoning (finish=length) or the
@@ -402,34 +456,12 @@ try {
     await appendFile(statePath, summary, "utf8");
     process.stderr.write(`[maker] appended diff summary to ${statePath}\n`);
   } else if (args.role === "verifier") {
-    // Verifier APPENDS to STATE.md (does not overwrite) so the maker's
-    // `## Diff Summary` section stays intact. The orchestrator parses the
-    // latest `## Verifier Verdict — Attempt N` section from STATE.md, and
-    // the human reader wants both the diff and the verdict on the same
-    // page for traceability.
-    //
-    // If STATE.md doesn't exist yet, scaffold a minimal header so the
-    // append lands under a recognisable preamble instead of a raw heading.
-    const statePath = args.output;
-    const attempt = process.env.LOOP_ATTEMPT ?? "1";
-    const reply = text ?? "";
-    let payload = reply;
-    try {
-      const { stat } = await import("node:fs/promises");
-      await stat(statePath);
-    } catch {
-      // File does not exist — write a minimal scaffold first so the append
-      // doesn't strand a heading at the top of an empty file.
-      const scaffold =
-        `# Loop State\n\n## Attempt: ${attempt} / ${process.env.LOOP_MAX_ATTEMPTS ?? "3"}\n\n`;
-      await writeFile(statePath, scaffold, "utf8");
-    }
-    // Ensure the verdict starts on its own line (the LLM sometimes returns
-    // a leading blank or no newline; we want clean heading boundaries).
-    if (!payload.startsWith("\n")) payload = "\n" + payload;
-    await appendFile(statePath, payload, "utf8");
+    // Streaming path: text was already appended chunk-by-chunk to
+    // STATE.md as the LLM produced it (see the streamText block above).
+    // This lets the orchestrator parse a live `**Criteria walk:**` and
+    // broadcast a real-time X/Y score to the UI. Nothing more to do here.
     process.stderr.write(
-      `[verifier] appended ${payload.length} chars to ${statePath}\n`
+      `[verifier] streamed ${text.length} chars to ${args.output}\n`
     );
   } else {
     // planner — write the LLM's reply verbatim to GOAL.md (replaces the

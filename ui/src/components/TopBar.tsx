@@ -41,6 +41,13 @@ export function TopBar({ onToggleSidebar, onNewTask }: TopBarProps) {
   const isRunning = useWorkflow((s) => s.isRunning);
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
   const wsStatus = useWorkflow((s) => s.wsStatus);
+  // Live + final score for the top-bar badge. Mirrors the same data the
+  // ProgressNode's HeaderScoreBadge reads from, so the two stay in sync
+  // — the TopBar just makes the score visible from any view (sidebar,
+  // connections, settings, etc.) instead of only when ProgressNode is
+  // mounted.
+  const liveScore = useWorkflow((s) => s.liveScore);
+  const verdict = useWorkflow((s) => s.verdict);
 
   const handleStop = () => {
     // Stop is destructive — fire an event that App picks up and shows a
@@ -159,6 +166,7 @@ export function TopBar({ onToggleSidebar, onNewTask }: TopBarProps) {
             </span>
             {taskMirror.model && <ModelBadge modelId={taskMirror.model} />}
             <PhaseBadge phase={phase} />
+            <LiveScoreBadge liveScore={liveScore} verdict={verdict} phase={phase} />
             {taskMirror.attempt > 0 && (
               <span className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                 Attempt {taskMirror.attempt}/{taskMirror.maxAttempts}
@@ -370,5 +378,115 @@ function IconButton({
         <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-rose-500" />
       )}
     </button>
+  );
+}
+
+/**
+ * Threshold for the autonomous /10 score. Mirrors the backend's
+ * SCRIPT_LOOP_MIN_SCORE_OUT_OF_10 (orchestrator.ts). Drift guard: a test
+ * in the backend pins the boundary at 7/10 — if you change this here,
+ * update that constant too.
+ */
+const SCRIPT_SCORE_THRESHOLD = 7;
+
+/**
+ * Colour the score chip. Same threshold family used elsewhere
+ * (ProgressNode / WorkflowNode): emerald ≥ 7 = done, amber 5–6 = close,
+ * rose < 5 = iterate.
+ */
+function topbarScoreToneClass(score: number): string {
+  if (score >= SCRIPT_SCORE_THRESHOLD) {
+    return "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-500/40";
+  }
+  if (score >= 5) {
+    return "bg-amber-100 text-amber-700 ring-1 ring-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/40";
+  }
+  return "bg-rose-100 text-rose-700 ring-1 ring-rose-300 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-500/40";
+}
+
+/**
+ * Live score badge for the TopBar. Sits next to the phase badge so the
+ * user sees the streaming /10 score no matter which view they're in
+ * (canvas, connections, settings, etc.) — not only when ProgressNode
+ * is mounted.
+ *
+ * Visibility:
+ *   - hidden when no score has been produced yet (planning / making
+ *     phase, before the verifier writes its criteria walk)
+ *   - pulsing during live streaming
+ *   - frozen on the final value once the verifier exits (or a verdict
+ *     has landed for a prior attempt)
+ *
+ * Mirrors the same data source the ProgressNode's HeaderScoreBadge
+ * reads, so the two stay in lockstep.
+ */
+function LiveScoreBadge({
+  liveScore,
+  verdict,
+  phase,
+}: {
+  liveScore: {
+    attempt: number;
+    passed: number;
+    total: number;
+    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+    done: boolean;
+  } | null;
+  verdict: {
+    attempt: number;
+    outcome: "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
+    criteriaWalk: Array<{ criterion: string; passed: boolean; evidence: string }>;
+  } | null;
+  phase: TaskStatus | null;
+}) {
+  // Prefer live (streaming) over final. If neither is present, hide.
+  // Don't synthesise a "0/0" chip before the verifier has had a chance
+  // to write anything — would be visual noise during planning / making.
+  const passed =
+    liveScore?.passed ??
+    (verdict ? verdict.criteriaWalk.filter((c) => c.passed).length : null);
+  const total =
+    liveScore?.total ??
+    (verdict ? verdict.criteriaWalk.length : null);
+  if (passed === null || total === null || total === 0) return null;
+  // Don't show during phases that haven't reached the verifier — the
+  // score is meaningless before that and clutters the top bar.
+  if (
+    phase !== "verifying" &&
+    phase !== "done" &&
+    phase !== "escalated" &&
+    liveScore === null &&
+    verdict === null
+  ) {
+    return null;
+  }
+  const score = Math.max(0, Math.min(10, Math.round((passed * 10) / total)));
+  const isLive = liveScore !== null && !liveScore.done;
+  return (
+    <span
+      className={cn(
+        "flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold tabular-nums",
+        topbarScoreToneClass(score)
+      )}
+      title={
+        isLive
+          ? `Live: ${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
+          : `Final: ${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
+      }
+    >
+      {isLive && (
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-60" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+        </span>
+      )}
+      <Sparkles size={10} className="opacity-70" />
+      <span className="font-mono">Score {score}/10</span>
+      {isLive && (
+        <span className="text-[8.5px] font-normal uppercase tracking-wider opacity-70">
+          live
+        </span>
+      )}
+    </span>
   );
 }

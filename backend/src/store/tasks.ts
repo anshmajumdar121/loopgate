@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve as pathResolve } from "node:path";
 import type { LogEntry, Task, TaskStatus } from "../types.js";
 import {
@@ -22,6 +23,16 @@ const store: Store = {
 export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_WORKDIR =
   process.env.LOOP_WORKDIR || process.cwd();
+
+/** Root for auto-derived per-task workspaces when the caller supplies no
+ *  workdir, project, or session. Previously we fell back to the server's
+ *  cwd (the backend folder itself) — the maker then wrote prototypes like
+ *  index.html INTO the orchestrator's source tree, and the build-runner
+ *  picked up the backend's own package.json and built the backend instead
+ *  of the task (gap #6 of 2026-07-12-snake-run-diagnosis). */
+export const TASK_WORKSPACES_ROOT =
+  process.env.LOOP_WORKSPACES_ROOT ||
+  pathResolve(homedir(), "LoopAgent-workspaces");
 
 /**
  * Persist a task to disk. Errors are swallowed and logged — a failed write
@@ -74,6 +85,7 @@ export function createTask(input: {
     explicit: input.workdir?.trim() || undefined,
     projectId,
     sessionId,
+    taskId: id,
   });
 
   const task: Task = {
@@ -114,7 +126,9 @@ export function createTask(input: {
  *   1. `explicit` — whatever the user typed (treated as authoritative)
  *   2. `<TASK_DATA_DIR>/workspaces/<projectId>/<sessionId>` — derived
  *   3. `<TASK_DATA_DIR>/workspaces/<projectId>` — project-only folder
- *   4. `DEFAULT_WORKDIR` — server cwd (no project/session)
+ *   4. `LOOP_WORKDIR` env — explicit server-wide override, if set
+ *   5. `~/LoopAgent-workspaces/<taskId>` — per-task folder (gap #6: never
+ *      default into the server's own source tree)
  *
  * The "workspaces/" prefix keeps project work dirs separate from the
  * task metadata files (which live in `tasks/<id>.json`). A user can `cd`
@@ -125,6 +139,7 @@ function resolveWorkdir(input: {
   explicit: string | undefined;
   projectId: string | undefined;
   sessionId: string | undefined;
+  taskId: string;
 }): string {
   if (input.explicit) return input.explicit;
   const root = pathResolve(TASK_DATA_DIR, "workspaces");
@@ -134,7 +149,10 @@ function resolveWorkdir(input: {
   if (input.projectId) {
     return pathResolve(root, input.projectId);
   }
-  return DEFAULT_WORKDIR;
+  // LOOP_WORKDIR is an explicit operator choice — honour it. Only the
+  // silent process.cwd() fallback moves to the per-task folder.
+  if (process.env.LOOP_WORKDIR) return process.env.LOOP_WORKDIR;
+  return pathResolve(TASK_WORKSPACES_ROOT, input.taskId);
 }
 
 /**
@@ -146,7 +164,14 @@ export function previewWorkdir(
   projectId: string | undefined,
   sessionId: string | undefined
 ): string {
-  return resolveWorkdir({ explicit: undefined, projectId, sessionId });
+  return resolveWorkdir({
+    explicit: undefined,
+    projectId,
+    sessionId,
+    // The real id doesn't exist yet at preview time — show a placeholder
+    // in the same layout the created task will use.
+    taskId: "<task-id>",
+  });
 }
 
 export function getTask(id: string): Task | undefined {

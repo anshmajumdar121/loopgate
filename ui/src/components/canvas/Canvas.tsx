@@ -45,17 +45,37 @@ function CanvasInner() {
     if (!isRunning) {
       return edges.map((e) => ({ ...e, data: { ...e.data, active: false } }));
     }
-    // Edges that should animate while a task is running. We light up the
-    // entry point (chatbot → orchestrator) so the user sees their input
-    // traveling into the loop, and the orchestrator → progress wire so
-    // the progress node "receives" updates. The remaining wires (the
-    // main spine) are highlighted by `node_status` events through the
-    // pill node's status — no need to re-mark them here.
-    const runSet = new Set([
+    // Edges that should animate while a task is running:
+    //   - chatbot → orchestrator (entry point: user input enters the loop)
+    //   - orchestrator → progress (progress node receives updates)
+    //   - any forward edge OUT of the currently active node so the user
+    //     sees data flowing to the next step (e.g. planner → plan_review
+    //     while planning, read_state → maker while implementing).
+    //   - any forward edge INTO a `queued` node so the user can see the
+    //     pipeline has more to do, instead of mistaking queued nodes for
+    //     broken ones.
+    const activeNodeId = nodes.find(
+      (n) => (n.data as { status?: string })?.status === "running"
+    )?.id;
+    const queuedNodeIds = new Set(
+      nodes
+        .filter((n) => (n.data as { status?: string })?.status === "queued")
+        .map((n) => n.id)
+    );
+    const runSet = new Set<string>([
       "chatbot-orchestrator",
-      "orchestrator-planner",
       "orchestrator-progress",
     ]);
+    if (activeNodeId) {
+      for (const e of edges) {
+        if (e.source === activeNodeId) {
+          runSet.add(`${e.source}-${e.target}`);
+        }
+        if (queuedNodeIds.has(e.target)) {
+          runSet.add(`${e.source}-${e.target}`);
+        }
+      }
+    }
     return edges.map((e) => ({
       ...e,
       data: {
@@ -63,7 +83,7 @@ function CanvasInner() {
         active: runSet.has(`${e.source}-${e.target}`),
       },
     }));
-  }, [edges, isRunning]);
+  }, [edges, isRunning, nodes]);
 
   const handleNodeClick: NodeMouseHandler = useCallback(
     (_e, node) => setSelected(node.id),

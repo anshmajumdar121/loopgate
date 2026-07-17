@@ -8,6 +8,8 @@ import { sessionsApi } from "./api/sessions.js";
 import { connectionsApi } from "./api/connections.js";
 import { connectionMetaApi } from "./api/connectionMeta.js";
 import { fsApi } from "./api/fs.js";
+import { insightsApi } from "./api/insights.js";
+import { ratchetApi } from "./api/ratchet.js";
 import { broadcaster } from "./ws/broadcaster.js";
 import {
   loadAllProjects,
@@ -24,6 +26,7 @@ import { loadSessionsFromDisk } from "./store/sessions.js";
 import { loadConnectionsFromDisk } from "./store/connections.js";
 import { loadTasksFromDisk } from "./store/tasks.js";
 import { loadUsageFromDisk } from "./store/tokenUsage.js";
+import { startConnectionHealthMonitor } from "./loop/connection-health.js";
 
 const app = new Hono();
 
@@ -34,6 +37,8 @@ app.route("/api", sessionsApi);
 app.route("/api", connectionsApi);
 app.route("/api", connectionMetaApi);
 app.route("/api", fsApi);
+app.route("/api", insightsApi);
+app.route("/api", ratchetApi);
 
 const PORT = Number(process.env.PORT || 3001);
 
@@ -113,6 +118,10 @@ httpServer.listen(PORT, "0.0.0.0", async () => {
         console.error(`[loop-agent-backend] failed to persist recovered task:`, err)
       );
     }
+    // Auto-verify connections: startup sweep now + re-check every
+    // CONN_HEALTH_INTERVAL_MS (see loop/connection-health.ts). Must run
+    // AFTER loadConnectionsFromDisk so the sweep sees the real records.
+    startConnectionHealthMonitor();
   } catch (err) {
     console.error(`[loop-agent-backend] Failed to load persisted tasks:`, err);
   }

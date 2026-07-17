@@ -56,6 +56,33 @@ interface WorkflowState {
   plan: PlanSummary | null;
   diff: DiffSummary | null;
   verdict: Verdict | null;
+  /** Live criteria-walk progress during the verifying phase. Updated by
+   *  the `verifier_progress` WS event; cleared when the phase ends.
+   *  Shape mirrors the parser's `CriteriaWalkItem[]` so the ProgressNode
+   *  can render the live walk the same way it renders the final one. */
+  liveScore: {
+    attempt: number;
+    passed: number;
+    total: number;
+    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+    done: boolean;
+  } | null;
+  /**
+   * Per-node score snapshot, keyed by canvas node id (planner / maker /
+   * verifier). The latest `node_score` WS event for each node wins; the
+   * `done` flag freezes the badge when the verifier exits. Read by
+   * WorkflowNode to render a small /10 chip on the contributing nodes.
+   */
+  nodeScores: Record<
+    string,
+    {
+      attempt: number;
+      passed: number;
+      total: number;
+      score: number;
+      done: boolean;
+    }
+  >;
   escalationReason: string | null;
   doneSummary: string | null;
   errorMessage: string | null;
@@ -90,6 +117,11 @@ interface WorkflowState {
   setPlan: (p: PlanSummary) => void;
   setDiff: (d: DiffSummary) => void;
   setVerdict: (v: Verdict) => void;
+  setLiveScore: (s: WorkflowState["liveScore"]) => void;
+  setNodeScore: (
+    nodeId: string,
+    entry: NonNullable<WorkflowState["nodeScores"][string]>
+  ) => void;
   setEscalation: (reason: string) => void;
   setDone: (summary: string) => void;
   setError: (message: string) => void;
@@ -108,6 +140,58 @@ interface WorkflowState {
 }
 
 const initial = layoutFromSpec(nodeSpecs, edgeSpecs);
+
+/**
+ * Walk the workflow graph from `startId` and return every node reachable
+ * via a forward edge (any output handle). Used by applyTaskStatusToNodes
+ * to mark downstream-of-active nodes as `queued` so the user can see the
+ * pipeline has more to do, instead of mistaking those nodes for broken.
+ *
+ * Loops are terminated by a hop budget (16) so a misconfigured back-edge
+ * can't hang the UI. BFS — depth doesn't matter for status assignment.
+ */
+/**
+ * The main pipeline in execution order. Nodes earlier than the phase's
+ * active node are painted "success" on every task_update so completed
+ * work stays visibly complete mid-run. Terminal/side nodes (retry, done,
+ * escalated, live_preview, chatbot, progress) are intentionally absent —
+ * they're driven by the queued/terminal logic and node_status events.
+ */
+const PIPELINE_ORDER: readonly string[] = [
+  "task",
+  "orchestrator",
+  "planner",
+  "plan_review",
+  "read_state",
+  "maker",
+  "verifier",
+  "verdict",
+];
+
+function collectDownstream(
+  startId: string | null,
+  edges: ReadonlyArray<{ source: string; target: string }>
+): Set<string> {
+  if (!startId) return new Set();
+  const out = new Set<string>();
+  let frontier: string[] = [startId];
+  let hops = 0;
+  const MAX_HOPS = 16;
+  while (frontier.length > 0 && hops < MAX_HOPS) {
+    hops++;
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const e of edges) {
+        if (e.source === id && !out.has(e.target)) {
+          out.add(e.target);
+          next.push(e.target);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
 
 export const useWorkflow = create<WorkflowState>((set, get) => ({
   // Graph
@@ -128,6 +212,8 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   plan: null,
   diff: null,
   verdict: null,
+  liveScore: null,
+  nodeScores: {},
   escalationReason: null,
   doneSummary: null,
   errorMessage: null,
@@ -206,6 +292,8 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       plan: null,
       diff: null,
       verdict: null,
+      liveScore: null,
+      nodeScores: {},
       escalationReason: null,
       doneSummary: null,
       errorMessage: null,
@@ -254,7 +342,23 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       })),
     });
   },
-  setTaskMirror: (t) => set({ taskMirror: t }),
+  setTaskMirror: (t) => {
+    // previewUrl often arrives via a task_update broadcast with no
+    // accompanying phase transition (the orchestrator registers it
+    // mid-attempt, before "verifying"), so `applyTaskStatusToNodes`
+    // alone would leave `live_preview` idle until the next phase
+    // change. Recompute its status here too, same as done/escalated
+    // paths in applyTaskStatusToNodes.
+    const previewLive = Boolean(t?.previewUrl);
+    set({
+      taskMirror: t,
+      nodes: get().nodes.map((n) =>
+        n.id === "live_preview"
+          ? { ...n, data: { ...n.data, status: (previewLive ? "success" : "idle") as RunStatus } }
+          : n
+      ),
+    });
+  },
   setPhase: (_from, to) => set({ phase: to }),
   appendLog: (entry) =>
     set((s) => ({ logs: [...s.logs, entry].slice(-500) })),
@@ -263,8 +367,14 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   setVerdict: (v) =>
     set({
       verdict: v,
+      // Final verdict arrived — clear the live score so the UI shows the
+      // canonical verdict instead of the streaming partial.
+      liveScore: null,
       awaitingFeedback: v.outcome === "REJECT",
     }),
+  setLiveScore: (s) => set({ liveScore: s }),
+  setNodeScore: (nodeId, entry) =>
+    set((s) => ({ nodeScores: { ...s.nodeScores, [nodeId]: entry } })),
   setEscalation: (reason) =>
     set({
       escalationReason: reason,
@@ -293,26 +403,65 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   applyTaskStatusToNodes: (status, _attempt) => {
     // Reset all then highlight the active node based on backend phase
     const activeNodeId = STATUS_TO_NODE[status] ?? null;
+    // `live_preview` tracks the URL itself, not the loop phase — the
+    // orchestrator registers a preview well before the task reaches
+    // "done" (right after the maker's runtime check), so this node
+    // should light up the moment a link exists rather than waiting for
+    // final approval. Computed once here and forced onto every branch
+    // below so the generic phase-based status logic never overrides it.
+    const mirror = get().taskMirror;
+    const previewLive = Boolean(mirror?.previewUrl);
+    // Downstream-of-active: nodes the loop will visit next. Marked
+    // "queued" so they get a subtle pulse — the user can tell the
+    // pipeline has more to do, instead of assuming the run is stuck.
+    // Skipped for terminal phases (done / escalated) where the graph
+    // is fully resolved.
+    const edges = get().edges;
+    const isTerminal = status === "done" || status === "escalated" || status === "cancelled";
+    const downstream = isTerminal
+      ? new Set<string>()
+      : collectDownstream(activeNodeId, edges);
+    // Everything upstream of the active node in the main pipeline has
+    // finished — paint it success so the frequent task_update broadcasts
+    // don't wipe completed nodes back to idle mid-run (that wipe was the
+    // "canvas looks stuck" bug: node_status refinements from the backend
+    // were clobbered by the very next task_update).
+    const activeIdx = activeNodeId ? PIPELINE_ORDER.indexOf(activeNodeId) : -1;
+    // Verifier REJECT parks the loop on the verdict/retry pair awaiting
+    // feedback — the verifier itself is finished at that point.
+    const awaitingRetry =
+      status === "verifying" && mirror?.verdict?.outcome === "REJECT";
     set({
       phase: status,
       awaitingConfirmation: status === "plan_review",
       isRunning: !["done", "escalated", "cancelled"].includes(status),
       nodes: get().nodes.map((n) => {
-        const isActive = n.id === activeNodeId;
-        // Keep prior success states (planner/done already done)
-        const prior =
-          status === "implementing" || status === "verifying"
-            ? n.id === "planner" || n.id === "plan_review"
-              ? "success"
-              : "idle"
-            : status === "done"
-            ? "success"
-            : "idle";
+        if (n.id === "live_preview") {
+          return {
+            ...n,
+            data: { ...n.data, status: (previewLive ? "success" : "idle") as RunStatus },
+          };
+        }
+        const idx = PIPELINE_ORDER.indexOf(n.id);
+        let next: RunStatus;
+        if (awaitingRetry && (n.id === "verdict" || n.id === "retry")) {
+          next = "waiting";
+        } else if (awaitingRetry && n.id === "verifier") {
+          next = "success";
+        } else if (n.id === activeNodeId) {
+          next = "running";
+        } else if (idx !== -1 && activeIdx !== -1 && idx < activeIdx) {
+          next = "success";
+        } else if (downstream.has(n.id)) {
+          next = "queued";
+        } else {
+          next = "idle";
+        }
         return {
           ...n,
           data: {
             ...n.data,
-            status: isActive ? "running" : (prior as RunStatus),
+            status: next,
           },
         };
       }),
@@ -323,17 +472,15 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
           ...n,
           data: {
             ...n.data,
-            status: (n.id === "done"
+            status: (n.id === "live_preview"
+              ? previewLive
+                ? "success"
+                : "idle"
+              : n.id === "done"
               ? "success"
               : n.id === "escalated"
               ? "idle"
-              : n.id === "task" ||
-                n.id === "orchestrator" ||
-                n.id === "planner" ||
-                n.id === "plan_review" ||
-                n.id === "read_state" ||
-                n.id === "maker" ||
-                n.id === "verifier"
+              : PIPELINE_ORDER.includes(n.id)
               ? "success"
               : "idle") as RunStatus,
           },
@@ -341,13 +488,33 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       });
     }
     if (status === "escalated") {
+      // Keep completed work visible: derive chain successes from what the
+      // task actually produced instead of blanking the whole canvas.
+      const done = new Set<string>(["task", "orchestrator"]);
+      if (mirror?.plan) {
+        done.add("planner");
+        done.add("plan_review");
+      }
+      if (mirror?.diff) {
+        done.add("read_state");
+        done.add("maker");
+      }
+      if (mirror?.verdict) done.add("verifier");
       set({
         nodes: get().nodes.map((n) => ({
           ...n,
           data: {
             ...n.data,
-            status: (n.id === "escalated"
+            status: (n.id === "live_preview"
+              ? previewLive
+                ? "success"
+                : "idle"
+              : n.id === "escalated"
               ? "error"
+              : n.id === "verdict" && mirror?.verdict
+              ? "error"
+              : done.has(n.id)
+              ? "success"
               : "idle") as RunStatus,
           },
         })),
@@ -363,6 +530,8 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       plan: null,
       diff: null,
       verdict: null,
+      liveScore: null,
+      nodeScores: {},
       escalationReason: null,
       doneSummary: null,
       errorMessage: null,

@@ -26,10 +26,18 @@ import { formatTokenCount, formatExactTokens, formatRelativeTime } from "@/lib/f
 import { NewConnectionModal } from "@/components/NewConnectionModal";
 import type {
   Connection,
+  ConnectionHealth,
   ConnectionTestResult,
   ConnectionTestStatus,
   TokenUsageEntry,
 } from "@/types/loop";
+
+// Auto-verify is purely event-driven:
+//   - on create / update (handled in the NewConnectionModal onSubmit below
+//     via `await handleTest(...)` after create/update)
+//   - on backend startup + every 5 min via connection-health.ts monitor
+// No client-side interval is needed (or exposed) — the user just adds a
+// connection and sees the dot turn green immediately.
 
 interface ConnectionsPanelProps {
   /** Called when the user wants to go back to the canvas. Top-bar style
@@ -121,7 +129,20 @@ export function ConnectionsPanel({ onBack }: ConnectionsPanelProps) {
     // worst case latency is the slowest individual test, not the sum.
     await Promise.all(connections.map((c) => handleTest(c)));
     setVerifyingAll(false);
-  }, [connections, handleTest]);
+    // The test endpoint also records health server-side — refresh so the
+    // per-card dot + "checked …" label pick up the new state.
+    void refresh();
+  }, [connections, handleTest, refresh]);
+
+  // Live dot updates: the backend broadcasts `connection_health` over WS
+  // whenever the monitor sees a status change; useLoopSocket re-emits it
+  // as a DOM event. Refreshing re-reads /api/connections (which now
+  // carries the `health` field).
+  useEffect(() => {
+    const onHealth = () => void refresh();
+    window.addEventListener("loop:connection-health", onHealth);
+    return () => window.removeEventListener("loop:connection-health", onHealth);
+  }, [refresh]);
 
   const modalOpen = creating || editing !== null;
 
@@ -229,6 +250,17 @@ export function ConnectionsPanel({ onBack }: ConnectionsPanelProps) {
           />
         )}
 
+        {/* Auto-verify status hint. No timer / no toggle — the panel
+            auto-tests on create and on edit, and the backend monitor
+            keeps things fresh. The "Verify all" button above is the
+            manual escape hatch. */}
+        {!loading && !error && connections.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[10.5px] text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Auto-verifies on add and edit · backend monitor runs continuously
+          </div>
+        )}
+
         <div className="mt-3 flex flex-col gap-3">
           {connections.map((c) => (
             <ConnectionCard
@@ -261,22 +293,19 @@ export function ConnectionsPanel({ onBack }: ConnectionsPanelProps) {
             setEditing(null);
           }}
           onSubmit={async (input) => {
-            // Save the connection first, then immediately test it so the
-            // user sees a result without having to click anything. We
-            // need the saved record's id (only available after the
-            // create call), so we issue a follow-up refresh and then
-            // test whatever the most-recently-touched connection is.
+            // Save the connection, then immediately test it so the user
+            // sees a result without clicking Verify. We await the test
+            // (which records health on the server), then refresh so the
+            // connection list picks up the fresh health dot immediately
+            // — no waiting for a background timer.
             if (editing) {
               await update(editing.id, input);
-              // Re-test the edited connection — its key/URL may have
-              // changed, so the old result is no longer valid anyway.
-              void handleTest(editing);
+              await handleTest(editing);
             } else {
               const created = await create(input);
-              // Auto-test the brand-new connection.
-              void handleTest(created);
+              await handleTest(created);
             }
-            void refresh();
+            await refresh();
           }}
         />
       )}
@@ -453,6 +482,7 @@ function ConnectionCard({
                 no key
               </span>
             )}
+            <HealthDot health={connection.health} checking={testing} />
           </div>
           <code className="mt-1 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
             {connection.baseUrl}
@@ -546,6 +576,47 @@ function ConnectionCard({
         )}
       </div>
     </article>
+  );
+}
+
+/**
+ * Live health dot (Part D2): green = last automated check passed, red =
+ * failed (error text on hover), gray = never checked, amber = a check is
+ * running right now. The "checked 2m ago" label reads the monitor's
+ * `checkedAt` timestamp.
+ */
+function HealthDot({
+  health,
+  checking,
+}: {
+  health?: ConnectionHealth;
+  checking: boolean;
+}) {
+  const color = checking
+    ? "bg-amber-400 animate-pulse"
+    : !health
+    ? "bg-zinc-300 dark:bg-zinc-600"
+    : health.ok
+    ? "bg-emerald-500"
+    : "bg-rose-500";
+  const title = checking
+    ? "Checking…"
+    : !health
+    ? "Never checked — the backend monitor will test it shortly."
+    : health.ok
+    ? `Healthy${typeof health.latencyMs === "number" ? ` — ${health.latencyMs}ms` : ""}`
+    : `Failed: ${health.error ?? "unknown error"}`;
+  return (
+    <span className="flex items-center gap-1" title={title}>
+      <span className={`inline-block h-2 w-2 rounded-full ${color}`} aria-hidden />
+      <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+        {checking
+          ? "checking…"
+          : health
+          ? `checked ${formatRelativeTime(health.checkedAt)}`
+          : "never checked"}
+      </span>
+    </span>
   );
 }
 

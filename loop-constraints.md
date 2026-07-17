@@ -6,6 +6,33 @@
 
 After 3 consecutive REJECT verdicts, the orchestrator **must** ESCALATE to the user. Do not retry infinitely. Do not let the maker "try one more thing" past the cap.
 
+### Script-loop exception: best-so-far return
+
+For tasks whose plan allowlist is exactly `["script.md"]` (the short-form
+script optimization loop), the max-attempts exit is **NOT** escalate.
+Instead, the orchestrator returns the attempt with the highest
+`criteriaWalk` pass-count and emits `done` with a score-trace summary
+("Returned best-so-far (attempt N, score M) …"). The user still gets a
+chance to reject via the UI; they just receive a concrete candidate to
+review instead of an empty hand-off. All other tasks keep the original
+escalate-on-max behavior.
+
+### Script-loop score-driven autonomy (no human in the loop)
+
+For script tasks, the verifier's `**Criteria walk:**` is graded on the
+F1–F7 rubric and scaled to a **0–10** display. The orchestrator uses
+this score to decide the loop's next action — no user feedback wait:
+
+| Verifier outcome | Score (/10) | Loop action |
+|---|---|---|
+| `APPROVE` | any | `done` immediately (verifier's own gate passed) |
+| `REJECT` | >= threshold (default 7) | `done` — script is good enough to ship |
+| `REJECT` | < threshold | auto-iterate to next attempt with the failed criteria as feedback; no user gate |
+| max attempts | any | best-so-far `done` with score trace (above) |
+
+Threshold is `LOOP_SCRIPT_MIN_SCORE` env (default 7, range 0–10). All
+other tasks keep the original REJECT → wait-for-user-feedback path.
+
 ## Path denylist (never edit without explicit human approval)
 
 ```

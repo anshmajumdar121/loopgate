@@ -142,7 +142,7 @@ export async function saveTask(task: Task): Promise<void> {
 async function doSave(task: Task): Promise<void> {
   await mkdir(DATA_DIR, { recursive: true });
   const filePath = resolve(DATA_DIR, `${task.id}.json`);
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = uniqueTmpPath(filePath);
   const content = JSON.stringify(task, null, 2);
   await writeFile(tmpPath, content, "utf8");
   await rename(tmpPath, filePath);
@@ -314,14 +314,14 @@ export async function loadAllSessions(): Promise<Session[]> {
  */
 export async function saveProjects(projects: Project[]): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
-  const tmp = `${PROJECTS_FILE}.tmp`;
+  const tmp = uniqueTmpPath(PROJECTS_FILE);
   await writeFile(tmp, JSON.stringify(projects, null, 2), "utf8");
   await rename(tmp, PROJECTS_FILE);
 }
 
 export async function saveSessions(sessions: Session[]): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
-  const tmp = `${SESSIONS_FILE}.tmp`;
+  const tmp = uniqueTmpPath(SESSIONS_FILE);
   await writeFile(tmp, JSON.stringify(sessions, null, 2), "utf8");
   await rename(tmp, SESSIONS_FILE);
 }
@@ -363,7 +363,7 @@ export async function saveConnections(
   connections: Connection[]
 ): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
-  const tmp = `${CONNECTIONS_FILE}.tmp`;
+  const tmp = uniqueTmpPath(CONNECTIONS_FILE);
   await writeFile(tmp, JSON.stringify(connections, null, 2), "utf8");
   await rename(tmp, CONNECTIONS_FILE);
 }
@@ -405,7 +405,20 @@ export async function saveTokenUsage(
   entries: TokenUsageEntry[]
 ): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
-  const tmp = `${TOKEN_USAGE_FILE}.tmp`;
+  const tmp = uniqueTmpPath(TOKEN_USAGE_FILE);
   await writeFile(tmp, JSON.stringify(entries, null, 2), "utf8");
   await rename(tmp, TOKEN_USAGE_FILE);
+}
+
+/**
+ * Per-call unique temp path for the write-then-rename pattern above.
+ * A fixed `${path}.tmp` name races when two saves of the SAME file land
+ * concurrently (observed: parallel connection-health checks each calling
+ * saveConnections — one call's rename() found the other's tmp file
+ * already moved, ENOENT). PID + a monotonic counter is enough; two calls
+ * in the same tick of the same process still get distinct names.
+ */
+let tmpCounter = 0;
+function uniqueTmpPath(path: string): string {
+  return `${path}.tmp-${process.pid}-${++tmpCounter}`;
 }

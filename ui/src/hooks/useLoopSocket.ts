@@ -51,6 +51,16 @@ export function useLoopSocket() {
           // above.
           break;
 
+        case "connection_health": {
+          // Not task-scoped. Re-broadcast as a DOM event so the
+          // Connections panel (which has no socket of its own) can
+          // refresh its list without threading through the task store.
+          window.dispatchEvent(
+            new CustomEvent("loop:connection-health", { detail: msg })
+          );
+          break;
+        }
+
         case "task_update": {
           if (msg.taskId !== s.currentTaskId) return;
           s.setTaskMirror(msg.task);
@@ -91,6 +101,34 @@ export function useLoopSocket() {
         case "verdict": {
           if (msg.taskId !== s.currentTaskId) return;
           s.setVerdict(msg.verdict);
+          break;
+        }
+
+        case "verifier_progress": {
+          if (msg.taskId !== s.currentTaskId) return;
+          s.setLiveScore({
+            attempt: msg.attempt,
+            passed: msg.passed,
+            total: msg.total,
+            partial: msg.partial,
+            done: msg.done,
+          });
+          break;
+        }
+
+        case "node_score": {
+          if (msg.taskId !== s.currentTaskId) return;
+          // Per-node score breakdown — feeds the small /10 chip on the
+          // matching canvas node. Ignore ids we don't render (e.g. if a
+          // future backend adds a node the UI hasn't been taught yet).
+          if (!msg.nodeId) return;
+          s.setNodeScore(msg.nodeId, {
+            attempt: msg.attempt,
+            passed: msg.passed,
+            total: msg.total,
+            score: msg.score,
+            done: msg.done,
+          });
           break;
         }
 

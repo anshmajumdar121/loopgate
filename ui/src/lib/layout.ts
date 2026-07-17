@@ -62,6 +62,9 @@ const MANUAL_POSITIONS: Record<string, { x: number; y: number }> = {
   done: { x: 40, y: 1080 },
   retry: { x: 370, y: 1080 },
   escalated: { x: 700, y: 1080 },
+  // Own row below `done` so its bottom-source wire has room to drop
+  // straight down without crossing the terminal row above it.
+  live_preview: { x: 40, y: 1210 },
 };
 
 /** Build the flow graph positioned by the manual layout table. */

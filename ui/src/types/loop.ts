@@ -31,10 +31,12 @@ export interface DiffFileChange {
 export interface DiffSummary {
   attempt: number;
   filesChanged: DiffFileChange[];
-  buildExit: number;
+  /** `null` when the maker didn't state a build exit (e.g. static files,
+   *  no build step) — render "n/a", never NaN. */
+  buildExit: number | null;
   testsPassed: number;
   testsFailed: number;
-  testsLintExit: number;
+  testsLintExit: number | null;
   notes: string;
 }
 
@@ -49,7 +51,7 @@ export type VerdictOutcome = "APPROVE" | "REJECT" | "ESCALATE_HUMAN";
 export interface Verdict {
   attempt: number;
   outcome: VerdictOutcome;
-  buildExit: number;
+  buildExit: number | null;
   testsPassed: number;
   testsFailed: number;
   scopePass: boolean;
@@ -233,11 +235,37 @@ export type WsServerMessage =
   | { type: "plan_ready"; taskId: string; plan: PlanSummary }
   | { type: "diff_ready"; taskId: string; diff: DiffSummary }
   | { type: "verdict"; taskId: string; verdict: Verdict }
+  | {
+      type: "verifier_progress";
+      taskId: string;
+      attempt: number;
+      passed: number;
+      total: number;
+      partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+      done: boolean;
+    }
+  // Per-node score breakdown. Fired alongside verifier_progress (same
+  // cadence) so the canvas can show a small /10 badge on whichever nodes
+  // contributed criteria this attempt. `nodeId` matches a canvas node id
+  // ("planner" / "maker" / "verifier"); the UI ignores unknown ids.
+  | {
+      type: "node_score";
+      taskId: string;
+      attempt: number;
+      nodeId: string;
+      passed: number;
+      total: number;
+      score: number;
+      done: boolean;
+    }
   | { type: "escalation"; taskId: string; reason: string }
   | { type: "done"; taskId: string; summary: string }
   | { type: "error"; taskId: string; message: string }
   | { type: "task_re_prompted"; taskId: string; prompt: string; attempt: number }
-  | { type: "task_deleted"; taskId: string };
+  | { type: "task_deleted"; taskId: string }
+  // Not task-scoped: fired whenever a connection's automated health check
+  // changes status. The Connections panel refreshes its list on receipt.
+  | { type: "connection_health"; connectionId: string; health: ConnectionHealth };
 
 export interface CreateTaskBody {
   prompt: string;
@@ -324,6 +352,9 @@ export interface Connection {
   /** Legacy multi-model form. Rendered as multiple picker options when
    *  `model` is absent. */
   models?: ConnectionModel[];
+  /** Latest automated health-check result (backend connection-health
+   *  monitor). Optional + additive — absent means "never checked". */
+  health?: ConnectionHealth;
   createdAt: string;
   updatedAt: string;
 }
@@ -345,6 +376,15 @@ export interface UpsertConnectionBody {
   /** Legacy multi-model form: list of models. Rendered as one picker entry
    *  per model when `model` is absent. */
   models?: ConnectionModel[];
+}
+
+/** Result of the most recent automated health check for a connection. */
+export interface ConnectionHealth {
+  ok: boolean;
+  latencyMs?: number;
+  error?: string;
+  /** ISO-8601 timestamp of when the check ran. */
+  checkedAt: string;
 }
 
 /** Build the model id used internally when referring to a model that

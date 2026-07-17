@@ -690,8 +690,8 @@ function FeedbackPanel() {
             </Section>
             <Section label="Build / Tests">
               <div className="grid grid-cols-2 gap-2 text-[12px]">
-                <Stat label="Build" value={verdict.buildExit === 0 ? "✓ pass" : "✗ fail"} />
-                <Stat label="Tests" value={`${verdict.testsPassed}/${verdict.testsPassed + verdict.testsFailed}`} />
+                <Stat label="Build" value={verdict.buildExit == null ? "n/a" : verdict.buildExit === 0 ? "✓ pass" : "✗ fail"} />
+                <Stat label="Tests" value={verdict.testsPassed + verdict.testsFailed === 0 ? "n/a" : `${verdict.testsPassed}/${verdict.testsPassed + verdict.testsFailed}`} />
               </div>
             </Section>
             <Section label="Criteria walk">
@@ -995,8 +995,8 @@ function DonePanel() {
             <div className="grid grid-cols-2 gap-2 text-[12px]">
               <Stat label="Outcome" value={verdict.outcome} />
               <Stat label="Attempt" value={`${verdict.attempt}`} />
-              <Stat label="Build" value={verdict.buildExit === 0 ? "✓" : "✗"} />
-              <Stat label="Tests" value={`${verdict.testsPassed}/${verdict.testsPassed + verdict.testsFailed}`} />
+              <Stat label="Build" value={verdict.buildExit == null ? "n/a" : verdict.buildExit === 0 ? "✓" : "✗"} />
+              <Stat label="Tests" value={verdict.testsPassed + verdict.testsFailed === 0 ? "n/a" : `${verdict.testsPassed}/${verdict.testsPassed + verdict.testsFailed}`} />
             </div>
           </Section>
         )}
@@ -1057,8 +1057,8 @@ function TaskOverviewPanel() {
               ))}
             </ul>
             <div className="mt-1.5 grid grid-cols-2 gap-2 text-[11.5px]">
-              <Stat label="Build" value={diff.buildExit === 0 ? "✓" : "✗"} />
-              <Stat label="Tests" value={`${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`} />
+              <Stat label="Build" value={diff.buildExit == null ? "n/a" : diff.buildExit === 0 ? "✓" : "✗"} />
+              <Stat label="Tests" value={diff.testsPassed + diff.testsFailed === 0 ? "n/a" : `${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`} />
             </div>
           </Section>
         )}

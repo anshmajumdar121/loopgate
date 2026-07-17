@@ -110,6 +110,15 @@ class Broadcaster {
     }
   }
 
+  /** Broadcast to EVERY connected socket, regardless of task subscription.
+   *  Used for non-task-scoped events (connection_health) — the Connections
+   *  panel has no task to subscribe to. */
+  broadcastAll(msg: WsServerMessage): void {
+    for (const [, sub] of this.subscribers) {
+      this.send(sub.ws, msg);
+    }
+  }
+
   /** Broadcast to a task AND fire on every listener — sugar for log+update */
   broadcastLog(
     taskId: string,

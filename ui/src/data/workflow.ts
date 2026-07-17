@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   MessageSquare,
   ListChecks,
+  ExternalLink,
   type LucideIcon,
 } from "lucide-react";
 
@@ -28,7 +29,18 @@ export type NodeKind =
   | "chatbot"
   | "progress";
 
-export type RunStatus = "idle" | "running" | "success" | "error" | "skipped" | "waiting";
+export type RunStatus =
+  | "idle"
+  | "running"
+  | "success"
+  | "error"
+  | "skipped"
+  | "waiting"
+  // "queued" — the node is downstream of the currently active node and
+  // will run once its predecessors complete. Renders with a subtle pulse
+  // so the user can see the pipeline has more to do, instead of mistaking
+  // it for a stuck node.
+  | "queued";
 
 export interface NodeSpec {
   id: string;
@@ -75,6 +87,7 @@ export const iconRegistry: Record<string, LucideIcon> = {
   escalated: AlertTriangle,
   chatbot: MessageSquare,
   progress: ListChecks,
+  live_preview: ExternalLink,
 };
 
 export const nodeSpecs: NodeSpec[] = [
@@ -162,6 +175,13 @@ export const nodeSpecs: NodeSpec[] = [
     iconName: "done",
   },
   {
+    id: "live_preview",
+    kind: "end-success",
+    title: "Live Preview",
+    subtitle: "Open the running prototype in a new tab.",
+    iconName: "live_preview",
+  },
+  {
     id: "escalated",
     kind: "end-escalated",
     title: "Escalated",
@@ -216,6 +236,7 @@ export const edgeSpecs: EdgeSpec[] = [
     branch: "yes",
     color: "success",
   },
+  { id: "e8b", source: "done", target: "live_preview", color: "success" },
   {
     id: "e9",
     source: "verdict",

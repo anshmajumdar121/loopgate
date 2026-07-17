@@ -76,16 +76,43 @@ describe("createTask + autoApprovePlan", () => {
   });
 
   it("survives a round-trip through the API", async () => {
-    const res = await app().request("/api/tasks", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "prompt", workdir: "/tmp", autoApprovePlan: true }),
-    });
-    expect(res.status).toBe(201);
-    const body = await res.json();
-    expect(body.task.autoApprovePlan).toBe(true);
-    // Stop the orchestrator the POST just kicked off so it doesn't
-    // run real LLM work in CI.
-    await app().request(`/api/tasks/${body.task.id}/stop`, { method: "POST" });
+    // Gap #1 (snake-run diagnosis) makes POST /tasks 400 when no model
+    // resolves to a keyed connection AND the env fallback is missing.
+    // This test is about autoApprovePlan, so satisfy the env fallback.
+    const prevKey = process.env.LOOP_LLM_API_KEY;
+    process.env.LOOP_LLM_API_KEY = "test-key";
+    try {
+      const res = await app().request("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "prompt", workdir: "/tmp", autoApprovePlan: true }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.task.autoApprovePlan).toBe(true);
+      // Stop the orchestrator the POST just kicked off so it doesn't
+      // run real LLM work in CI.
+      await app().request(`/api/tasks/${body.task.id}/stop`, { method: "POST" });
+    } finally {
+      if (prevKey === undefined) delete process.env.LOOP_LLM_API_KEY;
+      else process.env.LOOP_LLM_API_KEY = prevKey;
+    }
+  });
+
+  it("returns 400 with a named-role reason when no connection can authenticate (gap #1)", async () => {
+    const prevKey = process.env.LOOP_LLM_API_KEY;
+    delete process.env.LOOP_LLM_API_KEY;
+    try {
+      const res = await app().request("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "prompt", workdir: "/tmp" }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(String(body.error)).toMatch(/no connection configured for planner/);
+    } finally {
+      if (prevKey !== undefined) process.env.LOOP_LLM_API_KEY = prevKey;
+    }
   });
 });

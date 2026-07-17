@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type MouseEvent } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import {
   CheckCircle2,
@@ -10,6 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { RunStatus } from "@/data/workflow";
 import { NODE_HEIGHT, NODE_WIDTH } from "@/lib/layout";
+import { useWorkflow } from "@/lib/store";
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   spec: {
@@ -75,6 +76,23 @@ function getTone(spec: WorkflowNodeData["spec"]): Tone {
 }
 
 /**
+ * Tone classes for the per-node /10 score chip. Mirrors the threshold
+ * used elsewhere in the app (orchestrator SCRIPT_LOOP_MIN_SCORE_OUT_OF_10
+ * = 7): emerald = "done", amber = "close, keep going", rose = "iterate".
+ * Kept here (not imported from ProgressNode) so the canvas and the
+ * ProgressNode don't share a single point of failure for styling.
+ */
+function scoreToneClass(score: number): string {
+  if (score >= 7) {
+    return "bg-emerald-100 text-emerald-700 ring-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-500/40";
+  }
+  if (score >= 5) {
+    return "bg-amber-100 text-amber-700 ring-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/40";
+  }
+  return "bg-rose-100 text-rose-700 ring-rose-300 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-500/40";
+}
+
+/**
  * Decide where each source handle sits on the chip.
  *
  * The default React-Flow position for a source is Bottom-center, which
@@ -112,10 +130,32 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
   const tone = getTone(spec);
   const t = toneStyles[tone];
 
+  // The live-preview node is the one interactive pill in the diagram —
+  // clicking it opens the running prototype. Only wired when a URL
+  // actually exists (status flips to "success" the moment the
+  // orchestrator registers one; see store.ts applyTaskStatusToNodes /
+  // setTaskMirror).
+  const previewUrl = useWorkflow((s) => s.taskMirror?.previewUrl);
+  const isLivePreviewNode = spec.id === "live_preview";
+  const previewClickable = isLivePreviewNode && Boolean(previewUrl);
+  const openPreview = (e: MouseEvent) => {
+    if (!previewClickable) return;
+    e.stopPropagation();
+    window.open(previewUrl, "_blank", "noopener,noreferrer");
+  };
+
+  // Per-node score chip. Surfaces the canvas node's /10 contribution
+  // (planner / maker / verifier only — other node kinds don't drive
+  // the rubric). The chip is hidden until the first node_score event
+  // arrives and freezes on its final value once the verifier exits.
+  const nodeScore = useWorkflow((s) => s.nodeScores[spec.id] ?? null);
+  const showScoreChip = nodeScore !== null;
+
   const isSkipped = status === "skipped";
   const isRunning = status === "running";
   const isSuccess = status === "success";
   const isError = status === "error";
+  const isQueued = status === "queued";
 
   // When the node is in an error state, swap the icon for the warning glyph
   // so the failure reads instantly even without colour.
@@ -128,9 +168,16 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
         // No stroke on the container — the selection marker lives entirely
         // on the icon-circle (see the icon-circle's `outline` below).
         // The pill picks up only a soft sky tint, no border change.
-        isSkipped && "opacity-40 saturate-50"
+        isSkipped && "opacity-40 saturate-50",
+        // Live-preview affordance: pointer cursor + hover lift only when
+        // an actual URL exists to open; `nodrag` keeps React Flow from
+        // treating the click as the start of a node drag.
+        previewClickable && "nodrag cursor-pointer hover:brightness-105",
+        isLivePreviewNode && !previewClickable && "opacity-60"
       )}
       style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
+      onClick={openPreview}
+      title={previewClickable ? previewUrl : isLivePreviewNode ? "No live preview yet" : undefined}
     >
       {/* Running pulse — two stacked rings around the icon-circle.
           Ring colour flips to blue when the node is selected so the
@@ -148,6 +195,26 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
               "absolute inset-0 rounded-full ring-2 animate-pulse-ring",
               selected ? "ring-blue-400/60" : "ring-emerald-400/60"
             )}
+          />
+        </span>
+      )}
+
+      {/* Queued pulse — a softer, slower halo so the user can see the
+          node is in the pipeline queue (downstream of the active node)
+          without mistaking it for "running" or "stuck". A single ring
+          with low opacity beats at the 1.4s cadence. */}
+      {isQueued && !isRunning && (
+        <span className="pointer-events-none absolute left-0 top-1/2 z-0 grid h-11 w-11 -translate-y-1/2 place-items-center">
+          <span
+            className={cn(
+              "absolute inset-0 rounded-full ring-2 animate-pulse-ring",
+              selected
+                ? "ring-sky-300/50"
+                : tone === "decision"
+                ? "ring-indigo-300/40"
+                : "ring-emerald-300/40"
+            )}
+            style={{ animationDuration: "1.6s" }}
           />
         </span>
       )}
@@ -248,6 +315,31 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
               />
             )}
           </div>
+        )}
+
+        {/* Per-node score chip — surfaces the canvas node's /10
+            contribution. Sits between the status indicator and the
+            right edge of the pill, with its own tone family (emerald
+            ≥ 7 / amber 5–6 / rose < 5) so it stays legible regardless
+            of the node's success/error state. Hidden until the first
+            `node_score` WS event arrives; the LIVE label animates while
+            streaming and disappears once the verifier freezes. */}
+        {showScoreChip && nodeScore && (
+          <span
+            className={cn(
+              "ml-1 inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-px text-[9.5px] font-semibold tabular-nums ring-1",
+              scoreToneClass(nodeScore.score)
+            )}
+            title={`${nodeScore.passed}/${nodeScore.total} criteria pass → ${nodeScore.score}/10`}
+          >
+            {!nodeScore.done && (
+              <span className="relative flex h-1 w-1">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-60" />
+                <span className="relative inline-flex h-1 w-1 rounded-full bg-current" />
+              </span>
+            )}
+            <span className="font-mono">{nodeScore.score}/10</span>
+          </span>
         )}
       </div>
 

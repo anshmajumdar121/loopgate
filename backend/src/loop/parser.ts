@@ -93,13 +93,29 @@ function findSection(
   markdown: string,
   regex: RegExp
 ): { heading: string; attempt: number | null; lines: string[] } | null {
+  type Section = {
+    heading: string;
+    attempt: number | null;
+    lines: string[];
+    level: number;
+  };
   const lines = markdown.split(/\r?\n/);
-  let last: { heading: string; attempt: number | null; lines: string[] } | null = null;
-  let current: { heading: string; attempt: number | null; lines: string[] } | null = null;
+  let last: Section | null = null;
+  let current: Section | null = null;
 
   for (const raw of lines) {
     const headingMatch = raw.match(/^(#{1,6})\s+(.+?)\s*$/);
     if (headingMatch) {
+      const level = headingMatch[1].length;
+      // Deeper subheadings are CONTENT of the current section, not
+      // terminators — real verifier output sometimes writes fields as
+      // `### Criteria walk:` / `### Verdict:` headings instead of
+      // `**Field:**` lines, and closing the section there dropped the
+      // entire verdict body ("0/0 criteria pass").
+      if (current && level > current.level) {
+        current.lines.push(raw);
+        continue;
+      }
       // Close out the previous section
       if (current) last = current;
       const heading = headingMatch[2].trim();
@@ -110,6 +126,7 @@ function findSection(
           heading,
           attempt: attemptStr ? Number(attemptStr) : null,
           lines: [],
+          level,
         };
       } else {
         current = null;
@@ -120,6 +137,20 @@ function findSection(
   }
   if (current) last = current;
   return last;
+}
+
+/**
+ * Normalise heading-style field lines (`### Criteria walk:`, `#### Verdict`)
+ * inside a section body to the canonical `**Label:**` form, so every reader
+ * below (readField / readFieldBullets / parseCriteriaWalk) sees one format.
+ * Heading-style fields usually carry their value on the next line, which
+ * readField handles with a look-ahead.
+ */
+function normaliseFieldLines(lines: string[]): string[] {
+  return lines.map((line) => {
+    const m = line.match(/^\s*#{2,6}\s+(.+?):?\s*$/);
+    return m ? `**${m[1]}:**` : line;
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,12 +219,26 @@ function countNumberedItems(lines: string[]): number {
  */
 function readField(lines: string[], label: string): string | null {
   const re = new RegExp(
-    `^\\s*\\*\\*${escapeRegex(label)}:?\\*\\*:?\\s*(.+?)\\s*$`,
+    `^\\s*\\*\\*${escapeRegex(label)}:?\\*\\*:?\\s*(.*?)\\s*$`,
     "i"
   );
-  for (const line of lines) {
-    const m = line.match(re);
-    if (m) return m[1];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(re);
+    if (!m) continue;
+    if (m[1]) return m[1];
+    // Empty value on the field line itself — heading-style fields
+    // (`### Verdict:` normalised to `**Verdict:**`) put the value on the
+    // next line. Take the first non-empty line that isn't a new field
+    // header, heading, or bullet list.
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (!next) continue;
+      if (/^\*\*[^*]+:?\*\*:?/.test(next)) break;
+      if (/^#{1,6}\s+/.test(next)) break;
+      if (/^[-*]\s+/.test(next)) break;
+      return next;
+    }
+    return null;
   }
   return null;
 }
@@ -230,6 +275,15 @@ function escapeRegex(s: string): string {
 function firstInt(s: string): number {
   const m = s.match(/-?\d+/);
   return m ? Number(m[0]) : NaN;
+}
+
+/** Exit-code variant of firstInt: `null` instead of NaN when the line has
+ *  no integer (e.g. "n/a — static files, no build step"). NaN leaks into
+ *  logs/history as the literal string "NaN" ("build exit NaN"); null lets
+ *  display sites render "n/a". */
+function firstIntOrNull(s: string): number | null {
+  const n = firstInt(s);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,13 +378,9 @@ export function parseAttemptNumber(markdown: string): number {
 export function parseVerdictOutcome(markdown: string): VerdictOutcome | null {
   const section = findSection(markdown, VERDICT_HEADING_RE);
   if (!section) return null;
-  const raw = readField(section.lines, "Verdict");
+  const raw = readField(normaliseFieldLines(section.lines), "Verdict");
   if (!raw) return null;
-  const upper = raw.trim().toUpperCase();
-  if (upper === "APPROVE" || upper === "REJECT" || upper === "ESCALATE_HUMAN") {
-    return upper as VerdictOutcome;
-  }
-  return null;
+  return matchOutcome(raw);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -341,7 +391,8 @@ export function parseVerdictOutcome(markdown: string): VerdictOutcome | null {
  * Parse a `## Diff Summary — Attempt N` block. Maker writes this format per
  * `.opencode/agents/loop-maker.md`.
  */
-function parseDiffSection(lines: string[], attempt: number): DiffSummary {
+function parseDiffSection(rawLines: string[], attempt: number): DiffSummary {
+  const lines = normaliseFieldLines(rawLines);
   // Files changed — capture path + reason. Format: `- path — reason`.
   const filesChanged: DiffFileChange[] = [];
   for (const line of lines) {
@@ -364,10 +415,10 @@ function parseDiffSection(lines: string[], attempt: number): DiffSummary {
   return {
     attempt,
     filesChanged,
-    buildExit: firstInt(buildLine),
+    buildExit: firstIntOrNull(buildLine),
     testsPassed: Number.isFinite(testsPassed) ? testsPassed : 0,
     testsFailed: Number.isFinite(testsFailed) ? testsFailed : 0,
-    testsLintExit: firstInt(lintLine),
+    testsLintExit: firstIntOrNull(lintLine),
     notes: notesBullets.join("\n"),
   };
 }
@@ -376,7 +427,8 @@ function parseDiffSection(lines: string[], attempt: number): DiffSummary {
  * Parse a `## Verifier Verdict — Attempt N` block. Verifier writes this format
  * per `.opencode/agents/loop-verifier.md`.
  */
-function parseVerdictSection(lines: string[], attempt: number): Verdict {
+function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
+  const lines = normaliseFieldLines(rawLines);
   const verdictRaw = readField(lines, "Verdict") ?? "";
   const outcome = normaliseOutcome(verdictRaw);
 
@@ -397,7 +449,7 @@ function parseVerdictSection(lines: string[], attempt: number): Verdict {
   return {
     attempt,
     outcome,
-    buildExit: firstInt(buildLine),
+    buildExit: firstIntOrNull(buildLine),
     testsPassed: Number.isFinite(testsPassed) ? testsPassed : 0,
     testsFailed: Number.isFinite(testsFailed) ? testsFailed : 0,
     scopePass: scopeLine.toUpperCase().startsWith("PASS"),
@@ -407,11 +459,15 @@ function parseVerdictSection(lines: string[], attempt: number): Verdict {
     criteriaWalk,
     requiredFixes,
     // One-line reason: REJECT → first required fix; otherwise summarise from
-    // the criteria walk (count of passed vs failed).
+    // the criteria walk (count of passed vs failed). An empty walk must not
+    // surface as the misleading "0/0 criteria pass" — fall back to the first
+    // required fix or an explicit unparseable marker.
     oneLineReason:
       outcome === "REJECT" && requiredFixes.length > 0
         ? requiredFixes[0]
-        : `${criteriaWalk.filter((c) => c.passed).length}/${criteriaWalk.length} criteria pass`,
+        : criteriaWalk.length > 0
+        ? `${criteriaWalk.filter((c) => c.passed).length}/${criteriaWalk.length} criteria pass`
+        : requiredFixes[0] ?? "criteria walk missing or unparseable",
   };
 }
 
@@ -429,35 +485,88 @@ function parseCriteriaWalk(lines: string[]): CriteriaWalkItem[] {
     }
     if (/^\s*\*\*[^*]+:\*\*/.test(line)) break;
     if (/^\s*#{1,6}\s+/.test(line)) break;
+    // Checkbox form (`- [x] …` / `- [ ] …`) or tick/cross form
+    // (`- ✓ …` / `- ✗ …`) — verifiers on some models emit the latter.
+    let passed: boolean;
+    let restRaw: string;
     const m = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*$/);
+    const t = m ? null : line.match(/^\s*[-*]\s+([✓✔✅✗✘❌])\s+(.+?)\s*$/);
     if (m) {
-      const passed = m[1].toLowerCase() === "x";
-      const rest = m[2].trim();
+      passed = m[1].toLowerCase() === "x";
+      restRaw = m[2];
+    } else if (t) {
+      passed = /[✓✔✅]/.test(t[1]);
+      restRaw = t[2];
+    } else {
+      continue;
+    }
+    {
+      const rest = restRaw.trim();
       // Strip leading "FAILED: " prefix on failed items
       const cleaned = rest.replace(/^FAILED:\s*/i, "");
       // Split criterion — evidence at the first " — " or " - "
       const split = cleaned.match(/^(.+?)\s+[—-]\s+(.+)$/);
+      // Pull off an optional `[node: planner]` / `[planner]` / `[maker]` /
+      // `[verifier]` tag at the start of the criterion text. The verifier
+      // can emit this explicitly so per-node scoring doesn't depend on
+      // the F1–F7 fallback below.
+      const { text: criterionText, nodeId } = stripNodeTag(
+        split ? split[1].trim() : cleaned
+      );
       if (split) {
         out.push({
-          criterion: split[1].trim(),
+          criterion: criterionText,
           passed,
           evidence: split[2].trim(),
+          ...(nodeId ? { nodeId } : {}),
         });
       } else {
-        out.push({ criterion: cleaned, passed, evidence: "" });
+        out.push({
+          criterion: criterionText,
+          passed,
+          evidence: "",
+          ...(nodeId ? { nodeId } : {}),
+        });
       }
     }
   }
   return out;
 }
 
+/**
+ * Pull an optional `[node: planner]` / `[planner]` / `[maker]` / `[verifier]`
+ * tag off the front of a criterion string. Returns the cleaned text and the
+ * nodeId (or undefined). The tag is case-insensitive; trailing punctuation
+ * is tolerated. Anything else is left untouched — we never strip text that
+ * happens to be in brackets, so verifier prose survives.
+ */
+function stripNodeTag(text: string): { text: string; nodeId?: string } {
+  // Match a leading bracketed tag like `[planner]` or `[node: planner]`.
+  // Allows for nested spaces and a trailing colon.
+  const m = text.match(
+    /^\s*\[\s*(?:node\s*:\s*)?(planner|maker|verifier)\s*\]\s*:?\s*/i
+  );
+  if (m) return { text: text.slice(m[0].length).trim(), nodeId: m[1].toLowerCase() };
+  return { text };
+}
+
+/**
+ * Match a verdict outcome inside free-form text. Tolerates markdown
+ * decoration (`**REJECT**`), trailing prose (`REJECT — tests failing`),
+ * and tense variants (APPROVED / REJECTED). ESCALATE is checked first so
+ * "escalate to human, do not approve" never reads as APPROVE.
+ */
+function matchOutcome(raw: string): VerdictOutcome | null {
+  const upper = raw.toUpperCase();
+  if (/\bESCALATE(?:[_\s-]?HUMAN)?\b/.test(upper)) return "ESCALATE_HUMAN";
+  if (/\bAPPROVED?\b/.test(upper)) return "APPROVE";
+  if (/\bREJECT(?:ED)?\b/.test(upper)) return "REJECT";
+  return null;
+}
+
 function normaliseOutcome(raw: string): VerdictOutcome {
-  const upper = raw.trim().toUpperCase();
-  if (upper === "APPROVE" || upper === "REJECT" || upper === "ESCALATE_HUMAN") {
-    return upper as VerdictOutcome;
-  }
   // Default to REJECT — verifier default is "reject until proven otherwise".
-  return "REJECT";
+  return matchOutcome(raw) ?? "REJECT";
 }
 
 function normaliseRisk(raw: string): "LOW" | "MEDIUM" | "HIGH" {

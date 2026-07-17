@@ -10,6 +10,7 @@
 import { nanoid } from "nanoid";
 import type {
   Connection,
+  ConnectionHealth,
   ConnectionModel,
   ConnectionProviderType,
   ConnectionSummary,
@@ -176,6 +177,51 @@ export function loadConnectionsFromDisk(connections: Connection[]): void {
   connectionStore.connections = connections;
 }
 
+/**
+ * Record the latest health-check result on a connection and persist it.
+ * Returns the updated record, or undefined if the connection vanished
+ * between the check starting and finishing (deleted mid-flight — drop
+ * the result on the floor rather than resurrecting the record).
+ */
+export function setConnectionHealth(
+  id: string,
+  health: ConnectionHealth
+): Connection | undefined {
+  const conn = getConnection(id);
+  if (!conn) return undefined;
+  conn.health = health;
+  void saveConnections(connectionStore.connections).catch((err) => {
+    console.error(`[store] Failed to save health for connection ${id}:`, err);
+  });
+  return conn;
+}
+
+/**
+ * Connections that can serve a given agent role, best-first: dedicated to
+ * the role first, then general-use (no roles). Connections without an API
+ * key are excluded — they can't authenticate, so they're not failover
+ * candidates. Used by the orchestrator's stall/crash failover (Part C #2
+ * of 2026-07-12-snake-run-diagnosis) and pre-flight.
+ */
+export function connectionsForRole(
+  role: "planning" | "implementation" | "review"
+): Connection[] {
+  const all = listConnections().filter((c) => Boolean(c.apiKey));
+  const dedicated = all.filter((c) => (c.roles ?? []).includes(role));
+  const general = all.filter((c) => !c.roles || c.roles.length === 0);
+  return [...dedicated, ...general];
+}
+
+/**
+ * The picker-facing model id for a connection's first (or only) model:
+ * `custom:<connId>:<upstreamId>`. Returns null when the connection has no
+ * model configured in either shape.
+ */
+export function defaultModelIdForConnection(c: Connection): string | null {
+  const upstream = c.model ?? c.models?.[0]?.id;
+  return upstream ? `custom:${c.id}:${upstream}` : null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -212,6 +258,16 @@ export function resolveConnectionModel(
   const mdlId = parts.slice(2).join(":");
   const connection = getConnection(connId);
   if (!connection) return null;
+  // Single-model shape first (what the current UI writes): the picker id
+  // for these is `custom:<connId>:<connection.model>`. Without this branch
+  // they resolved to null and the orchestrator escalated with a bogus
+  // "connection was deleted" message.
+  if (connection.model && connection.model === mdlId) {
+    return {
+      connection,
+      model: { id: connection.model, label: connection.modelLabel },
+    };
+  }
   const models = connection.models ?? [];
   const model = models.find((m) => m.id === mdlId);
   if (!model) return null;

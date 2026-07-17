@@ -18,6 +18,7 @@
 
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
 import { writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import type { Connection } from "../types.js";
 import {
@@ -29,6 +30,7 @@ import {
   providerKeyForConnection,
 } from "../store/connections.js";
 import { recordUsage } from "../store/tokenUsage.js";
+import { writeTrace, type TraceRecord, type TraceRole } from "../store/traces.js";
 
 /**
  * Bridge runner that bypasses the `opencode` CLI subprocess. Why this
@@ -246,12 +248,27 @@ function spawnBridgeRunner(
   // chunk; the returned handle's `lastActivityAt` reads from this same
   // object so the orchestrator's stall watchdog sees live values.
   const activityTarget = { lastActivityAt: Date.now() };
+  const spawnTs = new Date().toISOString();
+  // Capture the latest usage payload the bridge runner reports on stderr.
+  // Forwarded by wrapStderrForUsageCapture on every successful parse —
+  // overwritten on each call, so the post-exit value is the final one.
+  const usageRef: { promptTokens: number | null; completionTokens: number | null } = {
+    promptTokens: null,
+    completionTokens: null,
+  };
   attachLineBuffer(child.stdout, onStdout, activityTarget);
   // Stderr carries both human-readable diagnostic lines AND a structured
   // token-usage line (`__LOOP_USAGE__:{json}__END__`). The capture
   // wrapper routes the structured line into the usage store and forwards
   // the rest to the caller's onStderr unchanged.
-  attachLineBuffer(child.stderr, wrapStderrForUsageCapture(onStderr), activityTarget);
+  attachLineBuffer(
+    child.stderr,
+    wrapStderrForUsageCapture(onStderr, (u) => {
+      usageRef.promptTokens = u.promptTokens;
+      usageRef.completionTokens = u.completionTokens;
+    }),
+    activityTarget
+  );
 
   const exited = new Promise<number | null>((resolve) => {
     let resolved = false;
@@ -266,6 +283,30 @@ function spawnBridgeRunner(
       resolve(code);
     };
     child.on("exit", (code, signal) => {
+      // Best-effort trace write. Failure here must NOT propagate — the
+      // orchestrator already saw onExit, and a trace bug shouldn't kill
+      // a working run. Recursive-improve (Phase 2) just won't have this
+      // call's data, which is the correct degradation.
+      void writeTraceBestEffort(
+        workdir,
+        {
+          taskId,
+          attempt: options?.attempt ?? 0,
+          role: agent as TraceRole,
+          model: options?.model ?? null,
+          upstreamModel,
+          connectionId: connection?.id ?? null,
+          connectionName: connection?.name ?? null,
+          ts: spawnTs,
+          durationMs: Date.now() - new Date(spawnTs).getTime(),
+          userPrompt: runPrompt,
+          outputFile: outFile,
+          promptTokens: usageRef.promptTokens,
+          completionTokens: usageRef.completionTokens,
+          exitCode: signal ? null : code,
+        },
+        onStderr
+      );
       resolveOnce(signal ? null : code);
     });
   });
@@ -330,6 +371,10 @@ function spawnBridgeRunner(
 export interface SpawnAgentOptions {
   model?: string;
   connection?: Connection | null;
+  /** 1-indexed attempt number — written into the trace filename. Optional
+   *  so existing call sites keep working; missing attempts become "0" in
+   *  the trace path. */
+  attempt?: number;
 }
 
 export function spawnAgent(
@@ -669,9 +714,17 @@ function attachLineBuffer(
  * Buffering: a single payload is expected to land on a single line, but
  * if a chunk boundary splits the `__END__` we still parse the start.
  * Worst case we lose one usage record and log a warning.
+ *
+ * If `onUsage` is supplied, the latest parsed payload is forwarded to it
+ * before being recorded. The spawner uses this to capture per-call tokens
+ * for the trace record without re-parsing stderr.
  */
 function wrapStderrForUsageCapture(
-  downstream: LineCallback
+  downstream: LineCallback,
+  onUsage?: (usage: {
+    promptTokens: number;
+    completionTokens: number;
+  }) => void
 ): LineCallback {
   return (line: string) => {
     const startIdx = line.indexOf("__LOOP_USAGE__:");
@@ -715,6 +768,7 @@ function wrapStderrForUsageCapture(
         promptTokens: prompt,
         completionTokens: completion,
       });
+      onUsage?.({ promptTokens: prompt, completionTokens: completion });
     } catch (err) {
       // Malformed JSON — forward to the UI log so the user can see it
       // (and we keep parity with how a non-structured line is treated).
@@ -735,6 +789,32 @@ function makeFailedHandle(taskId: string, _err: unknown): AgentHandle {
       AGENT_HANDLES.delete(taskId);
     },
   };
+}
+
+/**
+ * Write a trace record to disk, swallowing every error. Used by the bridge
+ * runner's exit handler so a trace bug can never crash a live run. The
+ * `response` field is filled in by reading the agent's output file —
+ * the bridge runner is required to have flushed it by exit time (the
+ * orchestrator's chokidar watcher depends on the same invariant).
+ */
+async function writeTraceBestEffort(
+  workdir: string,
+  record: Omit<TraceRecord, "response">,
+  onStderr: LineCallback
+): Promise<void> {
+  try {
+    const response = await readFile(record.outputFile, "utf8").catch(
+      () => ""
+    );
+    await writeTrace(workdir, { ...record, response });
+  } catch (err) {
+    onStderr(
+      `[trace-write] ${record.taskId}/${record.attempt}-${record.role}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+  }
 }
 
 /**

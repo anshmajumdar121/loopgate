@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import {
   Handle,
+  NodeResizer,
   Position,
   type NodeProps,
 } from "@xyflow/react";
@@ -111,6 +112,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
   const plan = useWorkflow((s) => s.plan);
   const diff = useWorkflow((s) => s.diff);
   const verdict = useWorkflow((s) => s.verdict);
+  const liveScore = useWorkflow((s) => s.liveScore);
   const escalationReason = useWorkflow((s) => s.escalationReason);
   const doneSummary = useWorkflow((s) => s.doneSummary);
   const isRunning = useWorkflow((s) => s.isRunning);
@@ -151,6 +153,27 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
     return logs[logs.length - 1];
   }, [logs]);
 
+  // Most recent LLM latency line for the active phase's agent — the
+  // backend emits `[<agent>] LLM OK in Nms, ...` after every LLM call.
+  // Surfaced on the active step so the user can see it's LLM latency,
+  // not a hang, when a step is in the long part of its work.
+  function latestLatencyMsForStep(stepId: string): number | null {
+    const phaseAgent = phaseAgentFor(stepId);
+    if (!phaseAgent) return null;
+    const re = new RegExp(
+      `\\[${phaseAgent}\\]\\s+LLM\\s+OK\\s+in\\s+(\\d+)ms`
+    );
+    for (let i = logs.length - 1; i >= Math.max(0, logs.length - 50); i--) {
+      const m = logs[i].text?.match(re);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  }
+  function formatLatency(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
   function activeLiveText(stepId: string): string {
     const phaseAgent = phaseAgentFor(stepId);
     const recentForPhase = phaseAgent
@@ -172,7 +195,22 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
       return escalationReason ?? "Failed.";
     }
     if (status === "active") {
-      return `Doing now: ${activeLiveText(stepId)}`;
+      // Active step summary — "Doing now: <latest log>". When the most
+      // recent LLM call latency is known for this phase's agent, append
+      // it so the user can tell "model is thinking" from "the loop is
+      // hung". On the planning step, also surface the retry counter
+      // (1/3, 2/3) — the planner is the phase that goes through
+      // re-prompts most often, and the user has no other way to see
+      // that progress.
+      const baseText = `Doing now: ${activeLiveText(stepId)}`;
+      const ms = latestLatencyMsForStep(stepId);
+      const parts: string[] = [baseText];
+      if (ms !== null) parts.push(`last call ${formatLatency(ms)}`);
+      if (stepId === "planning" && task && task.attempt > 0) {
+        const max = task.maxAttempts ?? 3;
+        parts.push(`attempt ${task.attempt + 1}/${max}`);
+      }
+      return parts.join(" · ");
     }
     // status === "done"
     if (stepId === "planning") {
@@ -182,8 +220,10 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
     if (stepId === "plan_review") return "Plan confirmed.";
     if (stepId === "implementation") {
       if (!diff) return "Implementation done.";
-      const build = diff.buildExit === 0 ? "passed" : "failed";
-      const tests = `${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`;
+      const build =
+        diff.buildExit == null ? "n/a" : diff.buildExit === 0 ? "passed" : "failed";
+      const testTotal = diff.testsPassed + diff.testsFailed;
+      const tests = testTotal === 0 ? "n/a" : `${diff.testsPassed}/${testTotal}`;
       return `Maker changed ${diff.filesChanged.length} file${diff.filesChanged.length === 1 ? "" : "s"} (build ${build}, tests ${tests}).`;
     }
     if (stepId === "verification") {
@@ -194,7 +234,8 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
           : verdict.outcome === "REJECT"
           ? "rejected"
           : "escalated";
-      const tests = `${verdict.testsPassed}/${verdict.testsPassed + verdict.testsFailed}`;
+      const vTotal = verdict.testsPassed + verdict.testsFailed;
+      const tests = vTotal === 0 ? "n/a" : `${verdict.testsPassed}/${vTotal}`;
       return `Verifier ${outcome} the change (tests ${tests}, risk ${verdict.risk}).`;
     }
     return "";
@@ -240,6 +281,19 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
           : "border-zinc-200 dark:border-zinc-800"
       )}
     >
+      {/* Drag-to-resize handles on all 4 corners/edges, visible only
+          when the node is selected — lets users grow the node when
+          AttemptTimeline content is tall, or shrink it back down. */}
+      <NodeResizer
+        isVisible={selected}
+        minWidth={320}
+        minHeight={200}
+        maxWidth={900}
+        maxHeight={1000}
+        handleClassName="!h-2.5 !w-2.5 !rounded-sm !border !border-emerald-500 !bg-white dark:!bg-zinc-900"
+        lineClassName="!border-emerald-400/60"
+      />
+
       {/* React Flow handles — left/right. The wire from the
           orchestrator enters here. */}
       <Handle
@@ -288,9 +342,9 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
         >
           {headerStatus}
         </span>
+        <HeaderScoreBadge liveScore={liveScore} verdict={verdict} />
         <PreviewLinkChip url={task?.previewUrl} />
         <RuntimeCheckPanel task={task} />
-        <AttemptTimeline task={task} />
       </div>
 
       {/* Step list — Image 2/3's numbered, always-expanded rows.
@@ -382,6 +436,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
                       plan={plan}
                       diff={diff}
                       verdict={verdict}
+                      liveScore={liveScore}
                       escalationReason={escalationReason}
                     />
                   )}
@@ -407,6 +462,11 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
             No task running. Start one from the chatbot.
           </p>
         )}
+
+        {/* Full-width block, not a header chip — was mistakenly mounted
+            in the single-line header flex row, which pushed its content
+            off the right edge of the node. Scrolls with the step list. */}
+        <AttemptTimeline task={task} />
       </div>
     </div>
   );
@@ -460,6 +520,7 @@ function StepDetail({
   plan,
   diff,
   verdict,
+  liveScore,
   escalationReason,
 }: {
   stepId: string;
@@ -467,11 +528,24 @@ function StepDetail({
   plan: PlanSummary | null;
   diff: DiffSummary | null;
   verdict: Verdict | null;
+  liveScore: {
+    attempt: number;
+    passed: number;
+    total: number;
+    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+    done: boolean;
+  } | null;
   escalationReason: string | null;
 }) {
   if (status === "active") {
-    // Active rows already have the "Doing now:" summary line; no
-    // additional rows needed.
+    // Active rows already have the "Doing now:" summary line. The one
+    // exception: the verification step gets a live X/Y PASS counter
+    // because the verifier streams its response into STATE.md and we
+    // can render the running score in real time. This is the
+    // "real-time live score in the verifier node" the user asked for.
+    if (stepId === "verification" && liveScore && liveScore.total > 0) {
+      return <LiveScoreCard liveScore={liveScore} />;
+    }
     return null;
   }
   if (status === "error") {
@@ -513,11 +587,15 @@ function StepDetail({
       <ul className="mt-1 space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
         <Row
           label="Build"
-          value={diff.buildExit === 0 ? "✓ pass" : "✗ fail"}
+          value={diff.buildExit == null ? "n/a" : diff.buildExit === 0 ? "✓ pass" : "✗ fail"}
         />
         <Row
           label="Tests"
-          value={`${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`}
+          value={
+            diff.testsPassed + diff.testsFailed === 0
+              ? "n/a"
+              : `${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`
+          }
         />
         {diff.filesChanged.length > 0 && (
           <li className="mt-1 space-y-0.5">
@@ -583,6 +661,229 @@ function Row({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </li>
+  );
+}
+
+/**
+ * Live verifier scorecard — renders the streaming `**Criteria walk:**`
+ * as the LLM emits it. Mirrors the shape of the post-verdict details
+ * so the transition to "done" is seamless. The "live" cue is a small
+ * pulsing dot + the "LIVE" label so the user knows the numbers will
+ * keep updating.
+ */
+/**
+ * Convert a (passed, total) pair from the criteria walk into the
+ * 0–10 scale the script-loop surfaces. Matches the orchestrator's
+ * `scaleScoreOutOf10` so backend + UI agree on the number.
+ */
+function scoreOutOf10(passed: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.max(0, Math.min(10, Math.round((passed * 10) / total)));
+}
+
+/** Threshold below which the script auto-iterates. Mirrors
+ *  SCRIPT_LOOP_MIN_SCORE_OUT_OF_10 in orchestrator.ts. */
+const SCRIPT_SCORE_THRESHOLD = 7;
+
+/**
+ * Color a 0–10 score the same way the orchestrator decides to ship
+ * or iterate: red < 5 (clearly not done), amber 5–6 (close, keep going),
+ * emerald >= 7 (good enough — done).
+ */
+function scoreToneClass(score: number): string {
+  if (score >= SCRIPT_SCORE_THRESHOLD) {
+    return "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-500/40";
+  }
+  if (score >= 5) {
+    return "bg-amber-100 text-amber-700 ring-1 ring-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/40";
+  }
+  return "bg-rose-100 text-rose-700 ring-1 ring-rose-300 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-500/40";
+}
+
+/**
+ * Score badge pinned to the ProgressNode header. Shows the live /10
+ * score while the verifier is streaming, the final /10 score after
+ * the verdict, and disappears when there's nothing to display (no
+ * attempt has been graded yet). Pulses while the score is live so
+ * the user can tell at a glance that the loop is still working.
+ */
+function HeaderScoreBadge({
+  liveScore,
+  verdict,
+}: {
+  liveScore: {
+    attempt: number;
+    passed: number;
+    total: number;
+    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+    done: boolean;
+  } | null;
+  verdict: Verdict | null;
+}) {
+  // Prefer the live score if present; fall back to the final verdict.
+  const passed = liveScore?.passed ?? (verdict ? verdict.criteriaWalk.filter((c) => c.passed).length : null);
+  const total = liveScore?.total ?? (verdict ? verdict.criteriaWalk.length : null);
+  if (passed === null || total === null || total === 0) return null;
+  const score = scoreOutOf10(passed, total);
+  const isLive = liveScore !== null && !liveScore.done;
+  const isFinal = liveScore?.done === true || (verdict && liveScore === null);
+  return (
+    <span
+      className={cn(
+        "ml-auto inline-flex items-center gap-1 rounded-full px-2 py-px text-[10px] font-semibold tabular-nums",
+        scoreToneClass(score)
+      )}
+      title={
+        isLive
+          ? `Streaming: ${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
+          : `${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
+      }
+    >
+      {isLive && (
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+        </span>
+      )}
+      <span className="font-mono">
+        Score {score}/10
+      </span>
+      {isLive && !isFinal && (
+        <span className="text-[8.5px] font-normal uppercase tracking-wider opacity-70">
+          live
+        </span>
+      )}
+    </span>
+  );
+}
+
+function LiveScoreCard({
+  liveScore,
+}: {
+  liveScore: {
+    attempt: number;
+    passed: number;
+    total: number;
+    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+    done: boolean;
+  };
+}) {
+  const failed = liveScore.partial.filter((c) => !c.passed).length;
+  const score = scoreOutOf10(liveScore.passed, liveScore.total);
+  const isFinal = liveScore.done;
+  const aboveThreshold = score >= SCRIPT_SCORE_THRESHOLD;
+  return (
+    <div
+      className={cn(
+        "mt-1 rounded-md border p-1.5",
+        aboveThreshold
+          ? "border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/60 dark:bg-emerald-950/30"
+          : score >= 5
+          ? "border-amber-200 bg-amber-50/60 dark:border-amber-800/60 dark:bg-amber-950/30"
+          : "border-rose-200 bg-rose-50/60 dark:border-rose-800/60 dark:bg-rose-950/30"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <span className="relative flex h-1.5 w-1.5">
+            <span
+              className={cn(
+                "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
+                aboveThreshold
+                  ? "bg-emerald-400"
+                  : score >= 5
+                  ? "bg-amber-400"
+                  : "bg-rose-400"
+              )}
+            />
+            <span
+              className={cn(
+                "relative inline-flex h-1.5 w-1.5 rounded-full",
+                aboveThreshold
+                  ? "bg-emerald-500"
+                  : score >= 5
+                  ? "bg-amber-500"
+                  : "bg-rose-500"
+              )}
+            />
+          </span>
+          <span
+            className={cn(
+              "text-[9.5px] font-semibold uppercase tracking-wider",
+              aboveThreshold
+                ? "text-emerald-700 dark:text-emerald-300"
+                : score >= 5
+                ? "text-amber-700 dark:text-amber-300"
+                : "text-rose-700 dark:text-rose-300"
+            )}
+          >
+            {isFinal ? "Final" : "Live"}
+          </span>
+          <span className="text-[9.5px] text-zinc-500 dark:text-zinc-400">
+            attempt {liveScore.attempt}
+          </span>
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span
+            className={cn(
+              "font-mono text-[15px] font-bold tabular-nums",
+              aboveThreshold
+                ? "text-emerald-700 dark:text-emerald-300"
+                : score >= 5
+                ? "text-amber-700 dark:text-amber-300"
+                : "text-rose-700 dark:text-rose-300"
+            )}
+            title={`${liveScore.passed}/${liveScore.total} criteria pass; threshold ${SCRIPT_SCORE_THRESHOLD}/10`}
+          >
+            {score}
+            <span className="text-[10px] font-normal text-zinc-400">/10</span>
+          </span>
+          {!isFinal && !aboveThreshold && (
+            <span className="text-[9px] text-zinc-500 dark:text-zinc-400">
+              need {SCRIPT_SCORE_THRESHOLD - score}
+            </span>
+          )}
+          {isFinal && aboveThreshold && (
+            <span className="text-[9px] font-semibold uppercase text-emerald-700 dark:text-emerald-300">
+              ✓ done
+            </span>
+          )}
+        </div>
+      </div>
+      {liveScore.partial.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {liveScore.partial.map((c, i) => (
+            <li
+              key={i}
+              className="flex items-start gap-1 text-[10px]"
+              title={c.evidence}
+            >
+              <span
+                className="shrink-0 font-mono"
+                style={{ color: c.passed ? "#3fb950" : "#f85149" }}
+              >
+                {c.passed ? "✓" : "✗"}
+              </span>
+              <span
+                className="text-zinc-600 dark:text-zinc-300"
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {c.criterion}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {failed > 0 && !isFinal && (
+        <p className="mt-1 text-[9px] text-zinc-500 dark:text-zinc-400">
+          {failed} failing · loop will auto-iterate when below {SCRIPT_SCORE_THRESHOLD}/10
+        </p>
+      )}
+    </div>
   );
 }
 

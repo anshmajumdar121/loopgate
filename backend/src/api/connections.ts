@@ -23,6 +23,7 @@ import {
   updateConnection,
 } from "../store/connections.js";
 import { onConnectionDeleted } from "./connectionMeta.js";
+import { checkConnectionHealth } from "../loop/connection-health.js";
 
 export const connectionsApi = new Hono();
 
@@ -81,6 +82,9 @@ connectionsApi.post(
   (c) => {
     const body = c.req.valid("json") as Parameters<typeof createConnection>[0];
     const created = createConnection(body);
+    // Auto-verify: test the brand-new connection in the background so the
+    // health dot is populated without any click (Part D1).
+    void checkConnectionHealth(created.id);
     return c.json({ connection: summarise(created) }, 201);
   }
 );
@@ -95,6 +99,9 @@ connectionsApi.patch(
     const body = c.req.valid("json") as Parameters<typeof updateConnection>[1];
     const updated = updateConnection(id, body);
     if (!updated) return c.json({ error: "connection not found" }, 404);
+    // Auto-verify: the key/URL may have changed — re-test in the background
+    // so the stored health never describes the previous credentials.
+    void checkConnectionHealth(id);
     return c.json({ connection: summarise(updated) });
   }
 );

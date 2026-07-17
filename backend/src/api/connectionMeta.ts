@@ -16,10 +16,11 @@ import {
   listUsage,
   usageTotals,
 } from "../store/tokenUsage.js";
+import { recordHealthResult } from "../loop/connection-health.js";
 
 export const connectionMetaApi = new Hono();
 
-interface TestResult {
+export interface TestResult {
   ok: boolean;
   status: "connected" | "failed" | "no_key" | "unsupported";
   message: string;
@@ -35,6 +36,9 @@ connectionMetaApi.post("/connections/:id/test", async (c) => {
     return c.json({ error: "connection not found" }, 404);
   }
   const result = await testConnection(connection);
+  // A manual Verify is also the freshest health signal we have — record it
+  // so the auto-verify status dot and the orchestrator pre-flight see it.
+  recordHealthResult(id, result);
   return c.json(result);
 });
 
@@ -74,7 +78,7 @@ export function onConnectionDeleted(connectionId: string): void {
  * URL so providers that don't expose a list endpoint aren't falsely
  * flagged as broken.
  */
-async function testConnection(connection: {
+export async function testConnection(connection: {
   baseUrl: string;
   apiKey?: string;
   providerType: "openai-compatible" | "anthropic-compatible";

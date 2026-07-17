@@ -6,6 +6,7 @@ import { NodeConfigPanel } from "@/components/NodeConfigPanel";
 import { LiveLogStrip } from "@/components/LiveLogStrip";
 import { StopConfirmModal } from "@/components/StopConfirmModal";
 import { ConnectionsPanel } from "@/components/ConnectionsPanel";
+import { ImprovePanel } from "@/components/ImprovePanel";
 import { useLoopSocket } from "@/hooks/useLoopSocket";
 import { useWorkflow } from "@/lib/store";
 import { useTaskList } from "@/lib/useTaskList";
@@ -116,6 +117,17 @@ export default function App() {
         )}
         {activeView === "connections" ? (
           <ConnectionsPanel onBack={() => setActiveView("workflow")} />
+        ) : activeView === "improve" ? (
+          <ImprovePanel
+            onTaskCreated={(taskId) => {
+              setActiveView("workflow");
+              setCurrentTask(taskId);
+              useWorkflow.setState({ isRunning: true });
+              resetNodeStatuses();
+              subscribe(taskId);
+              void refreshTasks();
+            }}
+          />
         ) : (
           <>
             <Canvas />

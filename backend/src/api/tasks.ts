@@ -12,6 +12,7 @@ import {
 import { runLoop, stopLoop, isLoopRunning, resumeLoop, resetTask, rePrompt } from "../loop/orchestrator.js";
 import { isActiveStatus } from "../store/persistence.js";
 import { broadcaster } from "../ws/broadcaster.js";
+import { resolveConnectionModel } from "../store/connections.js";
 import type { CreateTaskBody, ConfirmPlanBody, FeedbackBody } from "../types.js";
 
 const createSchema = z.object({
@@ -53,9 +54,68 @@ tasksApi.get("/tasks", (c) => {
   return c.json({ tasks: listTasks() });
 });
 
+/**
+ * Gap #1 (2026-07-12-snake-run-diagnosis): fail task creation LOUDLY when
+ * no role can resolve to a usable connection, instead of letting the
+ * planner crash two seconds later with "Missing api key". For each agent
+ * role, the effective model is `modelOverrides[role] ?? model`. A role is
+ * unusable when:
+ *   - no model is set AND the LOOP_LLM_API_KEY env fallback is absent
+ *     (the bridge runner would spawn with an empty key), or
+ *   - the model is a `custom:` id whose connection is gone or key-less.
+ * Returns a human-readable problem string, or null when every role can
+ * authenticate.
+ */
+function connectionProblemForTask(body: CreateTaskBody): string | null {
+  const roles = [
+    ["planner", "planning"],
+    ["maker", "implementation"],
+    ["verifier", "review"],
+  ] as const;
+  const problems: string[] = [];
+  for (const [agent, key] of roles) {
+    const model = body.modelOverrides?.[key] ?? body.model;
+    if (!model) {
+      if (!process.env.LOOP_LLM_API_KEY) {
+        problems.push(
+          `no connection configured for ${agent} (${key}) — pick a model/connection or set LOOP_LLM_API_KEY`
+        );
+      }
+      continue;
+    }
+    if (model.startsWith("custom:")) {
+      const resolved = resolveConnectionModel(model);
+      if (!resolved) {
+        problems.push(
+          `${agent} (${key}) uses model "${model}" but its connection no longer exists`
+        );
+      } else if (!resolved.connection.apiKey) {
+        problems.push(
+          `${agent} (${key}) uses connection "${resolved.connection.name}" which has no API key set`
+        );
+      }
+      continue;
+    }
+    // Curated model id — the bridge runner still authenticates with
+    // LOOP_LLM_API_KEY (no per-connection key to fall back on).
+    if (!process.env.LOOP_LLM_API_KEY) {
+      problems.push(
+        `${agent} (${key}) uses built-in model "${model}" but LOOP_LLM_API_KEY is not set — use a connection-backed model or set the env key`
+      );
+    }
+  }
+  return problems.length > 0 ? problems.join("; ") : null;
+}
+
 // Create + start
 tasksApi.post("/tasks", zValidator("json", createSchema), async (c) => {
   const body = c.req.valid("json") as CreateTaskBody;
+
+  // Fail fast on unusable model/connection configuration (gap #1).
+  const connectionProblem = connectionProblemForTask(body);
+  if (connectionProblem) {
+    return c.json({ error: connectionProblem }, 400);
+  }
 
   // Single-active-task enforcement: if a task is mid-loop, refuse the new
   // one with a 409 + a pointer to the active task. Plan recommends this to

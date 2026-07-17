@@ -19,6 +19,7 @@ import {
   FolderOpen,
   Layers,
   X,
+  Sparkles,
 } from "lucide-react";
 import { useTaskList } from "@/lib/useTaskList";
 import { useProjectList, useSessionList } from "@/lib/useProjectTree";
@@ -28,7 +29,7 @@ import { cn } from "@/lib/utils";
 import { NewProjectModal } from "@/components/NewProjectModal";
 import type { Project, Session, Task, TaskStatus } from "@/types/loop";
 
-export type SidebarView = "workflow" | "connections";
+export type SidebarView = "workflow" | "connections" | "improve";
 
 interface SidebarProps {
   onNewTask: () => void;
@@ -78,6 +79,12 @@ export function Sidebar({ onNewTask, activeView, onNavigate }: SidebarProps) {
           label="Connections"
           active={activeView === "connections"}
           onClick={() => onNavigate("connections")}
+        />
+        <NavItem
+          icon={Sparkles}
+          label="Recursive Improve"
+          active={activeView === "improve"}
+          onClick={() => onNavigate("improve")}
         />
         <NavItem icon={Settings} label="Settings" disabled />
       </nav>
