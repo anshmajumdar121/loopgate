@@ -629,6 +629,9 @@ function StepDetail({
           }
         />
         <Row label="Risk" value={verdict.risk} />
+        {typeof verdict.score === "number" && (
+          <Row label="Score" value={`${verdict.score}/100`} />
+        )}
         {verdict.criteriaWalk.length > 0 && (
           <li className="mt-1 space-y-0.5">
             {verdict.criteriaWalk.map((c, i) => (

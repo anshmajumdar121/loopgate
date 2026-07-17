@@ -446,6 +446,13 @@ function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
   const criteriaWalk = parseCriteriaWalk(lines);
   const requiredFixes = readFieldBullets(lines, "Required fixes");
 
+  const scoreMatch = lines.join("\n").match(/\*\*Score:\*\*\s*(\d{1,3})\s*\/\s*100/i);
+  const score = scoreMatch
+    ? Math.min(100, Number(scoreMatch[1]))
+    : criteriaWalk.length > 0
+    ? Math.round((100 * criteriaWalk.filter((c) => c.passed).length) / criteriaWalk.length)
+    : undefined;
+
   return {
     attempt,
     outcome,
@@ -468,6 +475,7 @@ function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
         : criteriaWalk.length > 0
         ? `${criteriaWalk.filter((c) => c.passed).length}/${criteriaWalk.length} criteria pass`
         : requiredFixes[0] ?? "criteria walk missing or unparseable",
+    score,
   };
 }
 

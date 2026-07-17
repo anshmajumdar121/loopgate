@@ -71,6 +71,10 @@ export interface Verdict {
   criteriaWalk: CriteriaWalkItem[];
   requiredFixes: string[];
   oneLineReason: string;
+  /** 0-100 quality score. Parsed from the verifier's `**Score:** NN/100`
+   *  line; falls back to round(100 * criteriaPassed/criteriaTotal) when
+   *  the line is absent. Optional — older persisted verdicts lack it. */
+  score?: number;
 }
 
 export interface HistoryEntry {

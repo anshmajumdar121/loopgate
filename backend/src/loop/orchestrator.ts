@@ -2543,6 +2543,10 @@ async function buildVerifierPrompt(
     "Follow the format your system prompt specifies. The bridge will append",
     "your reply to STATE.md without modification — do not include prose",
     "before or after the verdict block.",
+    "",
+    "End the verdict block with a line `**Score:** NN/100` — your overall",
+    "quality score for this attempt (100 = every criterion passes cleanly,",
+    "runtime check clean, no scope creep; subtract for each failure).",
   ].join("\n");
 }
 
