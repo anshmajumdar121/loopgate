@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "url": "http://localhost:3210/t/so06eZ2zvOS8/",
+  "consoleErrors": [],
+  "pageErrors": [],
+  "failedRequests": [],
+  "interactionLog": [
+    "clicked \"Restart\" — ok"
+  ],
+  "screenshotPath": "/Users/anshmajumdar/Desktop/Loop Agent/backend/.loop/runtime-attempt-1.png",
+  "evidenceMarkdown": "Loaded http://localhost:3210/t/so06eZ2zvOS8/ in headless chromium (viewport 1280x800, settled 2500ms).\nUncaught page errors: none\nConsole errors: none\nFailed network requests: none\nSmoke interactions:\n  - clicked \"Restart\" — ok\nOverall: NO runtime errors observed"
+}
