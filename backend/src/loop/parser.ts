@@ -329,6 +329,8 @@ export function parsePlanGoal(markdown: string): PlanSummary {
 const DIFF_HEADING_RE = /Diff Summary\s*[—-]\s*Attempt\s+(\d+)/i;
 const VERDICT_HEADING_RE = /Verifier Verdict\s*[—-]\s*Attempt\s+(\d+)/i;
 const ATTEMPT_HEADER_RE = /Attempt\s*:\s*(\d+)\s*\/\s*\d+/i;
+/** Extracts `NN` from a `Score` field value shaped like `NN/100`. */
+const SCORE_LINE_RE = /(\d{1,3})\s*\/\s*100/i;
 
 /**
  * Parse STATE.md into the latest diff + verdict blocks. Either may be null if
@@ -445,12 +447,14 @@ function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
 
   const criteriaWalk = parseCriteriaWalk(lines);
   const requiredFixes = readFieldBullets(lines, "Required fixes");
+  const criteriaPassed = criteriaWalk.filter((c) => c.passed).length;
 
-  const scoreMatch = lines.join("\n").match(/\*\*Score:\*\*\s*(\d{1,3})\s*\/\s*100/i);
+  const scoreLine = readField(lines, "Score") ?? "";
+  const scoreMatch = scoreLine.match(SCORE_LINE_RE);
   const score = scoreMatch
     ? Math.min(100, Number(scoreMatch[1]))
     : criteriaWalk.length > 0
-    ? Math.round((100 * criteriaWalk.filter((c) => c.passed).length) / criteriaWalk.length)
+    ? ratioToScore(criteriaPassed, criteriaWalk.length)
     : undefined;
 
   return {
@@ -473,10 +477,15 @@ function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
       outcome === "REJECT" && requiredFixes.length > 0
         ? requiredFixes[0]
         : criteriaWalk.length > 0
-        ? `${criteriaWalk.filter((c) => c.passed).length}/${criteriaWalk.length} criteria pass`
+        ? `${criteriaPassed}/${criteriaWalk.length} criteria pass`
         : requiredFixes[0] ?? "criteria walk missing or unparseable",
     score,
   };
+}
+
+/** Round a passed/total ratio to a 0-100 score. */
+function ratioToScore(passed: number, total: number): number {
+  return Math.round((100 * passed) / total);
 }
 
 /** Parse the criteria walk bullet list under `**Criteria walk:**`. */
