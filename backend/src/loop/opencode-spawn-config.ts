@@ -83,6 +83,17 @@ function providerEntryFor(c: Connection): ProviderEntry {
           apiKey: "",
         },
       };
+    case "mavis-cli":
+      // Same as local-cli above: mavis-cli connections run through
+      // spawnMavisBridge (agent-spawner.ts), never through this
+      // opencode CLI config-fragment path. Inert entry, exhaustiveness only.
+      return {
+        npm: "@ai-sdk/openai",
+        options: {
+          baseURL: c.baseUrl,
+          apiKey: "",
+        },
+      };
   }
 }
 

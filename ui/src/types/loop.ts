@@ -327,6 +327,7 @@ export type ConnectionProviderId =
   | "google"
   | "ollama"
   | "local-cli"
+  | "mavis-cli"
   | "custom";
 
 export interface ConnectionModel {

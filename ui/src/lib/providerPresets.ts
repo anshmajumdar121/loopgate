@@ -138,6 +138,19 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: [],
   },
   {
+    id: "mavis-cli",
+    name: "MiniMax Pro (Mavis CLI)",
+    description:
+      "Runs the loop through your machine's MiniMax Code / Mavis daemon — no API key. Uses your existing MiniMax Pro subscription instead of pay-per-token billing.",
+    providerType: "mavis-cli",
+    defaultBaseUrl: "http://localhost/mavis-cli",
+    endpointHint: "(not used — routes through the local Mavis daemon)",
+    apiKeyHint: "(not needed)",
+    noKey: true,
+    temperatureDefault: 0.7,
+    models: [],
+  },
+  {
     id: "custom",
     name: "Custom (BYO endpoint)",
     description:
