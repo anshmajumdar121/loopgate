@@ -4,12 +4,18 @@ import type { Task } from "@/types/loop";
 // the most recent headless-browser runtime check. Renders NOTHING when the
 // task has no runtimeCheck yet (older tasks, or tasks that haven't reached
 // the implementation phase) — safe to mount unconditionally.
-export function RuntimeCheckPanel({ task }: { task?: Task | null }) {
-  const rc = task?.runtimeCheck;
-  if (!rc || !task?.previewUrl) return null;
+export function RuntimeCheckPanel({
+  previewUrl,
+  runtimeCheck,
+}: {
+  previewUrl?: string;
+  runtimeCheck?: Task["runtimeCheck"];
+}) {
+  const rc = runtimeCheck;
+  if (!rc || !previewUrl) return null;
 
   const screenshotUrl = rc.screenshotRelPath
-    ? `${task.previewUrl}${rc.screenshotRelPath}`
+    ? `${previewUrl}${rc.screenshotRelPath}`
     : null;
 
   return (

@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import type { RunStatus } from "@/data/workflow";
 import { NODE_HEIGHT, NODE_WIDTH } from "@/lib/layout";
 import { useWorkflow } from "@/lib/store";
+import { RuntimeCheckPanel } from "@/components/RuntimeCheckPanel";
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   spec: {
@@ -136,6 +137,7 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
   // orchestrator registers one; see store.ts applyTaskStatusToNodes /
   // setTaskMirror).
   const previewUrl = useWorkflow((s) => s.taskMirror?.previewUrl);
+  const runtimeCheck = useWorkflow((s) => s.taskMirror?.runtimeCheck);
   const isLivePreviewNode = spec.id === "live_preview";
   const previewClickable = isLivePreviewNode && Boolean(previewUrl);
   const openPreview = (e: MouseEvent) => {
@@ -342,6 +344,19 @@ function WorkflowNodeImpl({ data, selected }: NodeProps) {
           </span>
         )}
       </div>
+
+      {/* Runtime check panel — absolutely positioned below the pill so it
+          doesn't affect the node's fixed width/height layout. Only ever
+          mounted for the live_preview node; RuntimeCheckPanel itself
+          renders null until both previewUrl + runtimeCheck are present. */}
+      {isLivePreviewNode && (
+        <div
+          className="nodrag nopan absolute left-0 top-full z-20 mt-2 w-56"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <RuntimeCheckPanel previewUrl={previewUrl} runtimeCheck={runtimeCheck} />
+        </div>
+      )}
 
       {/* Default target handle on TOP — incoming edges arrive here */}
       <Handle
