@@ -99,15 +99,20 @@ export async function checkConnectionHealth(
 
 /**
  * Translate a TestResult into ConnectionHealth, persist it, and broadcast
- * `connection_health` when the ok/error status CHANGED (first result
- * always broadcasts). Shared by the automatic monitor and the manual
+ * `connection_health`. Shared by the automatic monitor and the manual
  * `POST /connections/:id/test` endpoint so both paths keep the dot live.
+ *
+ * EVERY result broadcasts, not just status changes: the UI refetches only
+ * on this event, so gating on change left a steadily-healthy connection's
+ * "checked N min ago" display permanently stale (live user report — they
+ * had to click Verify to see updates). It also made any change-event lost
+ * to a WS reconnect unrecoverable. One small message per connection per
+ * sweep (5 min default) is negligible traffic.
  */
 export function recordHealthResult(
   connectionId: string,
   result: TestResult
 ): ConnectionHealth | null {
-  const prev = getConnection(connectionId)?.health;
   const health: ConnectionHealth = {
     ok: result.ok,
     latencyMs: result.latencyMs,
@@ -116,14 +121,11 @@ export function recordHealthResult(
   };
   const updated = setConnectionHealth(connectionId, health);
   if (!updated) return null; // deleted mid-check
-  const changed = !prev || prev.ok !== health.ok || prev.error !== health.error;
-  if (changed) {
-    broadcaster.broadcastAll({
-      type: "connection_health",
-      connectionId,
-      health,
-    });
-  }
+  broadcaster.broadcastAll({
+    type: "connection_health",
+    connectionId,
+    health,
+  });
   return health;
 }
 

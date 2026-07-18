@@ -33,6 +33,7 @@ const {
   ensureFreshHealth,
 } = await import("../connection-health.js");
 const { connectionsApi } = await import("../../api/connections.js");
+const { broadcaster } = await import("../../ws/broadcaster.js");
 const { Hono } = await import("hono");
 
 // ── fetch stub ───────────────────────────────────────────────────────────
@@ -101,6 +102,30 @@ describe("connection-health: startup sweep", () => {
     expect(typeof goodHealth?.checkedAt).toBe("string");
     expect(badHealth?.ok).toBe(false);
     expect(badHealth?.error).toMatch(/401|Auth rejected/i);
+  });
+});
+
+describe("connection-health: broadcast cadence", () => {
+  it("broadcasts every sweep result, even when the status did not change", async () => {
+    // The ConnectionsPanel refetches only when a `connection_health` WS
+    // event arrives. Gating broadcasts on status CHANGE meant a connection
+    // that stayed healthy never notified the UI again — its "checked N min
+    // ago" display grew stale forever until a manual Verify click (live
+    // user report). Every recorded result must broadcast.
+    const conn = makeConn("steady", "steady.example");
+    const spy = vi.spyOn(broadcaster, "broadcastAll").mockImplementation(() => {});
+    try {
+      await sweepAllConnections("manual");
+      await sweepAllConnections("manual");
+      const healthEvents = spy.mock.calls.filter(
+        ([msg]) =>
+          (msg as { type: string; connectionId?: string }).type === "connection_health" &&
+          (msg as { connectionId?: string }).connectionId === conn.id
+      );
+      expect(healthEvents.length).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

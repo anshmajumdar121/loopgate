@@ -190,6 +190,14 @@ export function useLoopSocket() {
       for (const taskId of pendingSubscriptions) {
         send({ type: "subscribe", taskId });
       }
+      // A connection_health broadcast that fired while this socket was
+      // down (the dev proxy cycles it every 30-60s) is gone for good —
+      // the server doesn't replay. Nudge the Connections panel to refetch
+      // on every (re)connect so it can never stay stale. detail: null
+      // distinguishes this resync nudge from a real broadcast.
+      window.dispatchEvent(
+        new CustomEvent("loop:connection-health", { detail: null })
+      );
       // Reset pong deadline
       if (pongDeadlineTimer.current !== null) {
         window.clearTimeout(pongDeadlineTimer.current);
