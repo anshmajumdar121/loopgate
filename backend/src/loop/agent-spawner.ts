@@ -98,8 +98,8 @@ export interface AgentHandle {
   getAccumulatedOutput?(): string;
 }
 
-type LineCallback = (line: string) => void;
-type ExitCallback = (code: number | null) => void;
+export type LineCallback = (line: string) => void;
+export type ExitCallback = (code: number | null) => void;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Module-level state
