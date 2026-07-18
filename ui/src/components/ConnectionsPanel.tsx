@@ -340,10 +340,25 @@ function HealthSummary({
   let untested = 0;
   for (const c of connections) {
     const r = testResults[c.id];
-    if (!r) untested++;
-    else if (r.status === "connected") connected++;
-    else if (r.status === "no_key") noKey++;
-    else failed++;
+    if (r) {
+      if (r.status === "connected") connected++;
+      else if (r.status === "no_key") noKey++;
+      else failed++;
+      continue;
+    }
+    // No explicit test run in THIS browser tab yet — fall back to
+    // connection.health, the server's own periodic check (startup +
+    // every 5 min + on create/update). Without this fallback the banner
+    // called every connection "untested" forever on a fresh page load
+    // even though its per-card dot was already green from an automated
+    // check (live report: card said "checked 10s ago" while the banner
+    // above it said "0 of 1 ready · 1 untested").
+    if (c.health) {
+      if (c.health.ok) connected++;
+      else failed++;
+      continue;
+    }
+    untested++;
   }
   const ready = connected;
   const needAttention = failed + noKey + untested;
