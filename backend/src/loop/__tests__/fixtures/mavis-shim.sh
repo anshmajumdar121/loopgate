@@ -51,12 +51,17 @@ case "$cmd" in
         exit 0
       fi
 
-      # success mode: only answer from the 2nd poll onward, so the test
-      # actually proves the poll loop loops (not just a lucky first read).
+      # success mode: poll 1 = just the user message (proves the poll loop
+      # loops). Poll 2 = an intermediate tool-calls message with empty
+      # content, exactly like a real agent mid-turn — must NOT be mistaken
+      # for completion (found live: an early poll grabbed this shape and
+      # wrote 0 chars to outFile). Poll 3+ = the real stop message.
       if [ "$polls" -lt 2 ]; then
         echo "{\"messages\":[{\"role\":\"user\",\"msg_content\":\"hi\"}]}"
+      elif [ "$polls" -lt 3 ]; then
+        echo "{\"messages\":[{\"role\":\"user\",\"msg_content\":\"hi\"},{\"role\":\"assistant\",\"finish_reason\":\"tool-calls\"}]}"
       else
-        echo "{\"messages\":[{\"role\":\"user\",\"msg_content\":\"hi\"},{\"role\":\"assistant\",\"msg_content\":\"PONG\",\"finish_reason\":\"stop\",\"usage\":{\"total_tokens\":42}}]}"
+        echo "{\"messages\":[{\"role\":\"user\",\"msg_content\":\"hi\"},{\"role\":\"assistant\",\"finish_reason\":\"tool-calls\"},{\"role\":\"assistant\",\"msg_content\":\"PONG\",\"finish_reason\":\"stop\",\"usage\":{\"total_tokens\":42}}]}"
       fi
       exit 0
     fi

@@ -108,7 +108,7 @@ function makeImmediateFailureHandle(
 export function spawnMavisBridge(
   agent: AgentName,
   _taskId: string,
-  _workdir: string,
+  workdir: string,
   runPrompt: string,
   outFile: string,
   systemPrompt: string,
@@ -148,6 +148,8 @@ export function spawnMavisBridge(
     agentName,
     "--from",
     "root",
+    "--workspace",
+    workdir,
     "--prompt",
     runPrompt,
     "--model",
@@ -199,7 +201,11 @@ export function spawnMavisBridge(
     const assistantMsgs = messages.filter((m) => m.role === "assistant");
     const last = assistantMsgs[assistantMsgs.length - 1];
     if (last?.msg_content) lastPartialContent = last.msg_content;
-    if (!last || !last.finish_reason) return; // still working — poll again
+    // "tool-calls" means the agent is mid-conversation (more turns coming,
+    // often with empty msg_content since the turn was just a tool call) —
+    // only "stop" means the agent has actually finished. Found live: an
+    // early poll grabbed a tool-calls message and wrote 0 chars to outFile.
+    if (!last || last.finish_reason !== "stop") return; // still working — poll again
 
     if (timer) clearInterval(timer);
     timer = null;
