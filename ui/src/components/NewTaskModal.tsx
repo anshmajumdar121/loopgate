@@ -66,18 +66,18 @@ export function NewTaskModal({
   // user has added custom API endpoints). The actual model pickers live in
   // the per-node side panel, not here.
   const { connections } = useConnectionList();
+  const nodeModels = useWorkflow((s) => s.nodeModels);
 
   const handleStart = async () => {
     if (!prompt.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
-      // Model selection is intentionally NOT part of this body — the
-      // per-role model pickers in the side panel drive the actual picks
-      // (resolved server-side from nodeModels + the project's default).
-      // Keeping the New Task modal focused on prompt / project / session /
-      // workdir is the simpler mental model: "create the task here,
-      // configure models on the canvas".
+      // Per-role model pickers in the side panel write to the client-side
+      // `nodeModels` store (see NodeModelPanel.tsx). The backend has no
+      // knowledge of that store, so it must be sent explicitly as
+      // `modelOverrides` — otherwise every task creation 400s with
+      // "no connection configured" regardless of what's picked on the canvas.
       const body: CreateTaskBody = {
         prompt: prompt.trim(),
         title: title.trim() || undefined,
@@ -89,6 +89,11 @@ export function NewTaskModal({
           .slice(0, 10),
         projectId: projectId || undefined,
         sessionId: sessionId || undefined,
+        modelOverrides: {
+          planning: nodeModels.planning,
+          implementation: nodeModels.implementation,
+          review: nodeModels.review,
+        },
       };
       const res = await fetch("/api/tasks", {
         method: "POST",
