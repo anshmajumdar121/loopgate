@@ -33,6 +33,18 @@ const CLAUDE_SHIM = resolve(
   process.cwd(),
   "src/loop/__tests__/fixtures/claude-shim.sh"
 );
+const CLAUDE_SHIM_MAKER = resolve(
+  process.cwd(),
+  "src/loop/__tests__/fixtures/claude-shim-maker.sh"
+);
+const CLAUDE_SHIM_FAIL = resolve(
+  process.cwd(),
+  "src/loop/__tests__/fixtures/claude-shim-fail.sh"
+);
+const CLAUDE_SHIM_EMPTY = resolve(
+  process.cwd(),
+  "src/loop/__tests__/fixtures/claude-shim-empty.sh"
+);
 
 let workdir: string | null = null;
 
@@ -165,5 +177,139 @@ describe("llm-agent.mjs --cli mode", () => {
     // plus the shim's reply appended after it.
     expect(content).toContain("# Loop State");
     expect(content).toContain("Implementation Plan");
+  });
+
+  it("extracts ```file: blocks and writes them under workdir for the maker role (single-shot, plus STATE.md Diff Summary)", async () => {
+    // Maker is the most complex per-role dispatch path (regex extraction,
+    // multi-file writing loop, path-safety checks) and, unlike
+    // planner/verifier, does NOT write to --output directly: it writes
+    // each extracted file under args.workdir at its extracted relative
+    // path, then appends a "## Diff Summary" section to
+    // <workdir>/STATE.md. --output is still a required CLI flag but is
+    // unused by the maker branch itself.
+    workdir = await mkdtemp(join(tmpdir(), "loop-cli-maker-"));
+    const outFile = join(workdir, "STATE.md");
+
+    const result = await runLlmAgent(
+      [
+        "--cli",
+        "--role",
+        "maker",
+        "--model",
+        "x",
+        "--base-url",
+        "x",
+        "--workdir",
+        workdir,
+        "--output",
+        outFile,
+      ],
+      {
+        LOOP_CLI_BIN: CLAUDE_SHIM_MAKER,
+        LOOP_USER_PROMPT: "test",
+      }
+    );
+
+    expect(result.code, `stderr:\n${result.stderr}`).toBe(0);
+
+    const written = await readFile(join(workdir, "index.html"), "utf8");
+    expect(written).toBe(
+      "<!doctype html><html><body>hi</body></html>"
+    );
+
+    const state = await readFile(join(workdir, "STATE.md"), "utf8");
+    expect(state).toContain("## Diff Summary");
+    expect(state).toContain("index.html");
+  });
+
+  it("exits nonzero and reports the CLI's exit status when the local CLI binary runs but exits nonzero", async () => {
+    workdir = await mkdtemp(join(tmpdir(), "loop-cli-failexit-"));
+    const outFile = join(workdir, "GOAL.md");
+
+    const result = await runLlmAgent(
+      [
+        "--cli",
+        "--role",
+        "planner",
+        "--model",
+        "x",
+        "--base-url",
+        "x",
+        "--workdir",
+        workdir,
+        "--output",
+        outFile,
+      ],
+      {
+        LOOP_CLI_BIN: CLAUDE_SHIM_FAIL,
+        LOOP_USER_PROMPT: "test",
+      }
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("llm-agent: FAIL: local CLI exit 1:");
+  });
+
+  it("exits nonzero cleanly (no hang/crash) when LOOP_CLI_BIN points at a binary that doesn't exist (ENOENT)", async () => {
+    workdir = await mkdtemp(join(tmpdir(), "loop-cli-enoent-"));
+    const outFile = join(workdir, "GOAL.md");
+
+    const result = await runLlmAgent(
+      [
+        "--cli",
+        "--role",
+        "planner",
+        "--model",
+        "x",
+        "--base-url",
+        "x",
+        "--workdir",
+        workdir,
+        "--output",
+        outFile,
+      ],
+      {
+        LOOP_CLI_BIN: "/nonexistent/path/to/nowhere-claude-binary",
+        LOOP_USER_PROMPT: "test",
+      }
+    );
+
+    // Confirmed (via a standalone spawnSync probe) that Node sets r.error
+    // (ENOENT) and r.status === null for a missing binary, which the code's
+    // `if (r.error)` branch at llm-agent.mjs ~line 281 catches and turns
+    // into a clean `process.exit(1)`. We assert on that outcome (nonzero
+    // exit, our own "spawn error" prefix) without pinning the exact wording
+    // of Node's own ENOENT error message, which isn't this codebase's
+    // contract.
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("llm-agent: FAIL: local CLI spawn error:");
+  });
+
+  it("exits 1 with the empty-content guard message when the CLI exits 0 but produces no stdout", async () => {
+    workdir = await mkdtemp(join(tmpdir(), "loop-cli-empty-"));
+    const outFile = join(workdir, "GOAL.md");
+
+    const result = await runLlmAgent(
+      [
+        "--cli",
+        "--role",
+        "planner",
+        "--model",
+        "x",
+        "--base-url",
+        "x",
+        "--workdir",
+        workdir,
+        "--output",
+        outFile,
+      ],
+      {
+        LOOP_CLI_BIN: CLAUDE_SHIM_EMPTY,
+        LOOP_USER_PROMPT: "test",
+      }
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("model returned empty content");
   });
 });
