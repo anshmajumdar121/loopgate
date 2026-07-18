@@ -17,7 +17,7 @@
 // real agent produces, so the parser treats it identically.
 
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
-import { writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { writeFileSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import type { Connection } from "../types.js";
@@ -31,6 +31,7 @@ import {
 } from "../store/connections.js";
 import { recordUsage } from "../store/tokenUsage.js";
 import { writeTrace, type TraceRecord, type TraceRole } from "../store/traces.js";
+import { spawnMavisBridge } from "./mavis-bridge.js";
 
 /**
  * Bridge runner that bypasses the `opencode` CLI subprocess. Why this
@@ -169,6 +170,25 @@ function spawnBridgeRunner(
   // LOOP_LOCAL_CLI=1 env var.
   const useLocalCli =
     connection?.providerType === "local-cli" || process.env.LOOP_LOCAL_CLI === "1";
+
+  // Mavis-CLI mode: routes through the user's local MiniMax Code / Mavis
+  // daemon instead of an HTTP endpoint or `claude -p`. See mavis-bridge.ts
+  // for the actual session/poll implementation.
+  const useMavisCli =
+    connection?.providerType === "mavis-cli" || process.env.LOOP_MAVIS_CLI === "1";
+  if (useMavisCli) {
+    return spawnMavisBridge(
+      agent,
+      taskId,
+      workdir,
+      runPrompt,
+      outFile,
+      loadSystemPromptForRole(agent, workdir),
+      onStdout,
+      onStderr,
+      onExit
+    );
+  }
 
   const args: string[] = [
     // NOTE: do NOT prepend LLM_AGENT_SCRIPT here. The script path is passed
@@ -358,6 +378,25 @@ function spawnBridgeRunner(
       }
     },
   };
+}
+
+/**
+ * Load the role's system prompt from `<workdir>/.opencode/agents/loop-<role>.md`,
+ * the same file llm-agent.mjs reads at runtime for the HTTP/local-cli bridge
+ * paths. Falls back to a minimal generic prompt if the file is missing —
+ * this only affects Mavis-CLI mode's one-time agent creation, not the
+ * per-call prompt (which is `runPrompt`, passed separately).
+ */
+function loadSystemPromptForRole(agent: AgentName, workdir: string): string {
+  try {
+    const path = pathResolve(workdir, ".opencode", "agents", `loop-${agent}.md`);
+    if (existsSync(path)) {
+      return readFileSync(path, "utf8");
+    }
+  } catch {
+    /* fall through to default */
+  }
+  return `You are the ${agent} role in an autonomous plan/implement/verify loop.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
