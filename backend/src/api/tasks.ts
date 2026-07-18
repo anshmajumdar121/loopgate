@@ -89,7 +89,12 @@ function connectionProblemForTask(body: CreateTaskBody): string | null {
         problems.push(
           `${agent} (${key}) uses model "${model}" but its connection no longer exists`
         );
-      } else if (!resolved.connection.apiKey) {
+      } else if (
+        resolved.connection.providerType !== "mavis-cli" &&
+        !resolved.connection.apiKey
+      ) {
+        // mavis-cli connections never have an apiKey — they authenticate
+        // via the user's already-logged-in Mavis daemon, not a portable key.
         problems.push(
           `${agent} (${key}) uses connection "${resolved.connection.name}" which has no API key set`
         );
