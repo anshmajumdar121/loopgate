@@ -96,6 +96,16 @@ export async function testConnection(connection: {
       message: "Local CLI mode — no network check needed (uses the machine's `claude` CLI).",
     };
   }
+  if (connection.providerType === "mavis-cli") {
+    // Same as local-cli above: no network endpoint, no portable API key —
+    // this connection shells out to the machine's `minimax` CLI, which
+    // authenticates via the user's already-logged-in Mavis daemon.
+    return {
+      ok: true,
+      status: "connected",
+      message: "Mavis CLI mode — no network check needed (uses the machine's MiniMax Code / Mavis daemon).",
+    };
+  }
   if (!connection.apiKey) {
     return {
       ok: false,

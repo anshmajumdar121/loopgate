@@ -628,6 +628,7 @@ export async function runLoop(taskId: string): Promise<void> {
       if (
         resolved?.connection &&
         resolved.connection.providerType !== "local-cli" &&
+        resolved.connection.providerType !== "mavis-cli" &&
         !resolved.connection.apiKey
       ) {
         const reason = `Connection "${resolved.connection.name}" has no API key set. Edit it via Connections → Edit → paste the key.`;
