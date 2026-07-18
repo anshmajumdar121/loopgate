@@ -19,18 +19,42 @@ fi
 cmd="${1:-}"
 sub="${2:-}"
 
+# Record every invocation so tests can assert which subcommands ran.
+echo "$*" >> "$STATE_DIR/invocations.log"
+
 case "$cmd" in
   agent)
     if [ "$sub" = "list" ]; then
-      echo "no agents"
+      # MAVIS_SHIM_AGENT_EXISTS lists the given agent name, simulating a
+      # daemon that already has the role agent registered (possibly with a
+      # stale system prompt).
+      if [ -n "${MAVIS_SHIM_AGENT_EXISTS:-}" ]; then
+        echo "[{\"name\":\"${MAVIS_SHIM_AGENT_EXISTS}\"}]"
+      else
+        echo "no agents"
+      fi
       exit 0
     elif [ "$sub" = "new" ]; then
       echo "Agent '${3:-}' created."
+      exit 0
+    elif [ "$sub" = "update" ]; then
+      echo "Agent '${3:-}' updated."
       exit 0
     fi
     ;;
   session)
     if [ "$sub" = "new" ]; then
+      # MAVIS_SHIM_SESSION_NEW_FAILS=<n>: fail the first n `session new`
+      # calls with the daemon-busy timeout error seen live, then succeed.
+      if [ -n "${MAVIS_SHIM_SESSION_NEW_FAILS:-}" ]; then
+        fails_file="$STATE_DIR/session_new_fails"
+        so_far=$(cat "$fails_file" 2>/dev/null || echo 0)
+        if [ "$so_far" -lt "$MAVIS_SHIM_SESSION_NEW_FAILS" ]; then
+          echo $((so_far + 1)) > "$fails_file"
+          echo "Error: Cannot connect to Mavis daemon (supervisor-managed): The operation was aborted due to timeout." >&2
+          exit 1
+        fi
+      fi
       session_id="mvs_test_session"
       echo "0" > "$STATE_DIR/$session_id.polls"
       # The real minimax CLI prints this human-readable line (with ANSI

@@ -32,6 +32,7 @@ import {
 import { recordUsage } from "../store/tokenUsage.js";
 import { writeTrace, type TraceRecord, type TraceRole } from "../store/traces.js";
 import { spawnMavisBridge } from "./mavis-bridge.js";
+import { loadSystemPromptForRole } from "./role-prompts.js";
 
 /**
  * Bridge runner that bypasses the `opencode` CLI subprocess. Why this
@@ -380,24 +381,10 @@ function spawnBridgeRunner(
   };
 }
 
-/**
- * Load the role's system prompt from `<workdir>/.opencode/agents/loop-<role>.md`,
- * the same file llm-agent.mjs reads at runtime for the HTTP/local-cli bridge
- * paths. Falls back to a minimal generic prompt if the file is missing —
- * this only affects Mavis-CLI mode's one-time agent creation, not the
- * per-call prompt (which is `runPrompt`, passed separately).
- */
-function loadSystemPromptForRole(agent: AgentName, workdir: string): string {
-  try {
-    const path = pathResolve(workdir, ".opencode", "agents", `loop-${agent}.md`);
-    if (existsSync(path)) {
-      return readFileSync(path, "utf8");
-    }
-  } catch {
-    /* fall through to default */
-  }
-  return `You are the ${agent} role in an autonomous plan/implement/verify loop.`;
-}
+// loadSystemPromptForRole moved to role-prompts.ts: the fallback is now the
+// canonical role prompt (with the parser's output-format contract) instead
+// of a one-line description. The one-liner left Mavis-bridge roles without
+// any format contract → parser read 0 files / 0 criteria → escalation.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API

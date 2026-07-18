@@ -18,6 +18,7 @@ describe("spawnMavisBridge", () => {
     process.env.LOOP_MAVIS_BIN = SHIM;
     process.env.MAVIS_SHIM_STATE_DIR = stateDir;
     process.env.LOOP_MAVIS_POLL_INTERVAL_MS = "20";
+    process.env.LOOP_MAVIS_SESSION_RETRY_DELAY_MS = "20";
   });
 
   afterEach(() => {
@@ -27,6 +28,59 @@ describe("spawnMavisBridge", () => {
     delete process.env.MAVIS_SHIM_STATE_DIR;
     delete process.env.LOOP_MAVIS_POLL_INTERVAL_MS;
     delete process.env.MAVIS_SHIM_MODE;
+    delete process.env.MAVIS_SHIM_AGENT_EXISTS;
+    delete process.env.MAVIS_SHIM_SESSION_NEW_FAILS;
+    delete process.env.LOOP_MAVIS_SESSION_RETRY_DELAY_MS;
+  });
+
+  function invocations(): string[] {
+    const log = join(stateDir, "invocations.log");
+    return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
+  }
+
+  it("creates the role agent with the system prompt when it does not exist", async () => {
+    process.env.MAVIS_SHIM_MODE = "success";
+    const handle = spawnMavisBridge(
+      "planner",
+      "task-4",
+      workdir,
+      "Reply with PONG",
+      outFile,
+      "You are a test planner.",
+      () => {},
+      () => {},
+      () => {}
+    );
+    await handle.exited;
+    const calls = invocations();
+    expect(calls.some((c) => c.startsWith("agent new loop-planner"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("agent update"))).toBe(false);
+  });
+
+  it("refreshes the system prompt of an already-registered agent", async () => {
+    // Live bug: loop-* agents created in an earlier run keep their original
+    // (possibly contract-less) system prompt forever, because ensureAgent
+    // skipped existing agents entirely. The bridge must push the current
+    // prompt via `agent update` instead.
+    process.env.MAVIS_SHIM_MODE = "success";
+    process.env.MAVIS_SHIM_AGENT_EXISTS = "loop-planner";
+    const handle = spawnMavisBridge(
+      "planner",
+      "task-5",
+      workdir,
+      "Reply with PONG",
+      outFile,
+      "You are a fresh planner prompt.",
+      () => {},
+      () => {},
+      () => {}
+    );
+    await handle.exited;
+    const calls = invocations();
+    expect(calls.some((c) => c.startsWith("agent new"))).toBe(false);
+    const update = calls.find((c) => c.startsWith("agent update loop-planner"));
+    expect(update).toBeDefined();
+    expect(update).toContain("You are a fresh planner prompt.");
   });
 
   it("polls until the assistant replies, writes outFile, emits usage", async () => {
@@ -92,6 +146,36 @@ describe("spawnMavisBridge", () => {
     await handle.exited;
     expect(exitCode).toBeNull();
     expect(existsSync(outFile)).toBe(false);
+  });
+
+  it("retries session creation past transient daemon-busy timeouts", async () => {
+    // Live failure: the daemon serves the user's own interactive session
+    // too, and under load `session new` exceeds the CLI's HTTP timeout.
+    // One transient timeout must not kill a whole loop attempt.
+    process.env.MAVIS_SHIM_MODE = "success";
+    process.env.MAVIS_SHIM_SESSION_NEW_FAILS = "2";
+    process.env.LOOP_MAVIS_SESSION_RETRY_DELAY_MS = "20";
+    const stderrLines: string[] = [];
+    let exitCode: number | null | undefined;
+
+    const handle = spawnMavisBridge(
+      "planner",
+      "task-6",
+      workdir,
+      "Reply with PONG",
+      outFile,
+      "You are a test planner.",
+      () => {},
+      (l) => stderrLines.push(l),
+      (c) => {
+        exitCode = c;
+      }
+    );
+
+    await handle.exited;
+    expect(exitCode).toBe(0);
+    expect(readFileSync(outFile, "utf8")).toBe("PONG");
+    expect(stderrLines.some((l) => l.includes("retrying"))).toBe(true);
   });
 
   it("fails fast when the Mavis daemon is not running", async () => {

@@ -29,6 +29,18 @@ function pollIntervalMs(): number {
   return Number(process.env.LOOP_MAVIS_POLL_INTERVAL_MS || 3000);
 }
 
+/** How many times to attempt `session new` before giving up. The daemon
+ *  also serves the user's own interactive Mavis sessions; under that load
+ *  a `session new` can exceed the CLI's HTTP timeout even though the
+ *  daemon is healthy (observed live twice in a row). */
+function sessionNewTries(): number {
+  return Number(process.env.LOOP_MAVIS_SESSION_RETRIES || 3);
+}
+
+function sessionRetryDelayMs(): number {
+  return Number(process.env.LOOP_MAVIS_SESSION_RETRY_DELAY_MS || 10_000);
+}
+
 /**
  * The real `minimax` CLI prints a human-readable line before the JSON
  * payload on some commands (e.g. `session new` → "Root session created:
@@ -65,14 +77,27 @@ function runMavis(args: string[]): MavisRunResult {
 }
 
 /**
- * Ensure the role's persistent Mavis agent exists. Idempotent by
- * construction: we don't check `agent new`'s exit code, so a concurrent
- * "already exists" race from another role's startup is a no-op, not a
- * failure (see design spec §4, "Agent creation race").
+ * Ensure the role's persistent Mavis agent exists AND carries the current
+ * system prompt. An existing agent gets `agent update --system-prompt` on
+ * every spawn: the daemon persists agents across backend releases, so a
+ * skip-if-exists check would pin whatever prompt the agent was first
+ * created with forever (live: loop-maker ran with the old one-line
+ * fallback prompt long after the canonical prompts shipped, and the maker
+ * improvised a STATE.md layout the parser read as 0 files → escalation).
+ * Unconditional update over compare-then-update because `agent info`
+ * returns the composed prompt (Mavis appends its own boilerplate), so an
+ * equality check against what we set never matches.
+ *
+ * Idempotent by construction: we don't check `agent new`'s exit code, so a
+ * concurrent "already exists" race from another role's startup is a no-op,
+ * not a failure (see design spec §4, "Agent creation race").
  */
 function ensureAgent(agentName: string, systemPrompt: string): void {
   const list = runMavis(["agent", "list"]);
-  if (list.status === 0 && list.stdout.includes(agentName)) return;
+  if (list.status === 0 && list.stdout.includes(agentName)) {
+    runMavis(["agent", "update", agentName, "--system-prompt", systemPrompt]);
+    return;
+  }
   runMavis([
     "agent",
     "new",
@@ -84,25 +109,6 @@ function ensureAgent(agentName: string, systemPrompt: string): void {
     "--display-name",
     agentName,
   ]);
-}
-
-function makeImmediateFailureHandle(
-  exited: Promise<number | null>,
-  activityTarget: { lastActivityAt: number },
-  finish: (code: number | null) => void
-): AgentHandle {
-  queueMicrotask(() => finish(1));
-  return {
-    pid: -1,
-    isMock: false,
-    exited,
-    get lastActivityAt() {
-      return activityTarget.lastActivityAt;
-    },
-    kill() {
-      /* already finishing */
-    },
-  };
 }
 
 export function spawnMavisBridge(
@@ -121,6 +127,7 @@ export function spawnMavisBridge(
   let killed = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let lastSeenMessageCount = 0;
+  let messageCountBaselined = false;
   let lastPartialContent = "";
 
   let resolveExited: (code: number | null) => void = () => {};
@@ -142,44 +149,64 @@ export function spawnMavisBridge(
   onStdout(`[mavis-bridge] starting session for ${agentName}`);
   ensureAgent(agentName, systemPrompt);
 
-  const created = runMavis([
-    "session",
-    "new",
-    agentName,
-    "--from",
-    "root",
-    "--workspace",
-    workdir,
-    "--prompt",
-    runPrompt,
-    "--model",
-    "minimax/MiniMax-M2.7",
-  ]);
-  if (created.status !== 0) {
-    onStderr(
-      `[mavis-bridge] session new failed (exit ${created.status}): ${created.stderr.trim()}`
-    );
-    return makeImmediateFailureHandle(exited, activityTarget, finish);
-  }
+  let sessionId: string | null = null;
 
-  let sessionId: string;
-  try {
-    const parsed = JSON.parse(extractJson(created.stdout)) as { sessionId?: string };
-    if (!parsed.sessionId) throw new Error("no sessionId in response");
-    sessionId = parsed.sessionId;
-  } catch (err) {
-    onStderr(
-      `[mavis-bridge] could not parse session id: ${
-        err instanceof Error ? err.message : String(err)
-      } — raw: ${created.stdout}`
-    );
-    return makeImmediateFailureHandle(exited, activityTarget, finish);
-  }
+  // Session creation runs through a retry loop (timer-driven, so a retry
+  // delay never blocks the caller): a busy daemon can push one `session
+  // new` past the CLI's HTTP timeout without being down. A parse failure
+  // on a SUCCESSFUL response is not retried — that's a contract mismatch,
+  // and retrying could double-create sessions (double token spend).
+  const tryCreateSession = (attemptsLeft: number) => {
+    if (killed) return;
+    const created = runMavis([
+      "session",
+      "new",
+      agentName,
+      "--from",
+      "root",
+      "--workspace",
+      workdir,
+      "--prompt",
+      runPrompt,
+      "--model",
+      "minimax/MiniMax-M2.7",
+    ]);
+    if (created.status !== 0) {
+      if (attemptsLeft > 1) {
+        onStderr(
+          `[mavis-bridge] session new failed (exit ${created.status}): ${created.stderr.trim()} — retrying in ${sessionRetryDelayMs()}ms (${attemptsLeft - 1} left)`
+        );
+        setTimeout(() => tryCreateSession(attemptsLeft - 1), sessionRetryDelayMs());
+        return;
+      }
+      onStderr(
+        `[mavis-bridge] session new failed (exit ${created.status}): ${created.stderr.trim()}`
+      );
+      finish(1);
+      return;
+    }
 
-  onStdout(`[mavis-bridge] session ${sessionId} started`);
+    try {
+      const parsed = JSON.parse(extractJson(created.stdout)) as { sessionId?: string };
+      if (!parsed.sessionId) throw new Error("no sessionId in response");
+      sessionId = parsed.sessionId;
+    } catch (err) {
+      onStderr(
+        `[mavis-bridge] could not parse session id: ${
+          err instanceof Error ? err.message : String(err)
+        } — raw: ${created.stdout}`
+      );
+      finish(1);
+      return;
+    }
+
+    onStdout(`[mavis-bridge] session ${sessionId} started`);
+    timer = setInterval(poll, pollIntervalMs());
+    poll(); // fire once immediately rather than waiting a full interval
+  };
 
   const poll = () => {
-    if (killed) return;
+    if (killed || !sessionId) return;
     const result = runMavis(["session", "messages", sessionId]);
     if (result.status !== 0) {
       onStderr(`[mavis-bridge] poll failed (exit ${result.status}): ${result.stderr.trim()}`);
@@ -193,7 +220,13 @@ export function spawnMavisBridge(
       return; // malformed JSON on this poll — try again next tick.
     }
 
-    if (messages.length > lastSeenMessageCount) {
+    if (!messageCountBaselined) {
+      // First poll: the transcript already contains our own prompt message
+      // (and possibly more) — that's setup, not agent progress. Baseline
+      // the count so only genuinely NEW output advances the stall clock.
+      messageCountBaselined = true;
+      lastSeenMessageCount = messages.length;
+    } else if (messages.length > lastSeenMessageCount) {
       lastSeenMessageCount = messages.length;
       activityTarget.lastActivityAt = Date.now();
     }
@@ -242,8 +275,9 @@ export function spawnMavisBridge(
     finish(0);
   };
 
-  timer = setInterval(poll, pollIntervalMs());
-  poll(); // fire once immediately rather than waiting a full interval
+  // Deferred so the caller always holds the handle before any finish()
+  // callback can fire (matches the old makeImmediateFailureHandle timing).
+  queueMicrotask(() => tryCreateSession(sessionNewTries()));
 
   return {
     pid: -1,
