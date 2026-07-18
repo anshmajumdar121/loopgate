@@ -125,6 +125,12 @@ function ChatbotNodeImpl({ data, selected }: NodeProps) {
   const diff = useWorkflow((s) => s.diff);
   const verdict = useWorkflow((s) => s.verdict);
   const logs = useWorkflow((s) => s.logs);
+  // Same per-role model pickers NewTaskModal sends as modelOverrides.
+  // Without this, every task minted from this quick-create input 400s
+  // with "no connection configured" whenever LOOP_LLM_API_KEY is unset
+  // (i.e. any connection-only setup, e.g. the Mavis CLI bridge) — this
+  // node is the only OTHER place besides NewTaskModal that creates tasks.
+  const nodeModels = useWorkflow((s) => s.nodeModels);
   const { subscribe } = useLoopSocket();
 
   const [prompt, setPrompt] = useState("");
@@ -271,6 +277,11 @@ function ChatbotNodeImpl({ data, selected }: NodeProps) {
         // as "unassigned within parent".
         projectId: projectId || undefined,
         sessionId: sessionId || undefined,
+        modelOverrides: {
+          planning: nodeModels.planning,
+          implementation: nodeModels.implementation,
+          review: nodeModels.review,
+        },
       };
       const res = await fetch("/api/tasks", {
         method: "POST",
