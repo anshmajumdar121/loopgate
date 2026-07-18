@@ -29,6 +29,19 @@ function pollIntervalMs(): number {
   return Number(process.env.LOOP_MAVIS_POLL_INTERVAL_MS || 3000);
 }
 
+/**
+ * The real `minimax` CLI prints a human-readable line before the JSON
+ * payload on some commands (e.g. `session new` → "Root session created:
+ * mvs_... [model=...]", with ANSI color codes), unlike our test fixture
+ * which only ever emitted bare JSON. Extract from the first `{` onward so
+ * both shapes parse correctly — found live against the real daemon during
+ * the manual smoke test (Task 8), after the fixture-only tests passed.
+ */
+function extractJson(stdout: string): string {
+  const idx = stdout.indexOf("{");
+  return idx === -1 ? stdout : stdout.slice(idx);
+}
+
 interface MavisMessage {
   role?: string;
   msg_content?: string;
@@ -149,7 +162,7 @@ export function spawnMavisBridge(
 
   let sessionId: string;
   try {
-    const parsed = JSON.parse(created.stdout) as { sessionId?: string };
+    const parsed = JSON.parse(extractJson(created.stdout)) as { sessionId?: string };
     if (!parsed.sessionId) throw new Error("no sessionId in response");
     sessionId = parsed.sessionId;
   } catch (err) {
@@ -173,7 +186,7 @@ export function spawnMavisBridge(
     }
     let messages: MavisMessage[];
     try {
-      messages = (JSON.parse(result.stdout) as { messages?: MavisMessage[] }).messages ?? [];
+      messages = (JSON.parse(extractJson(result.stdout)) as { messages?: MavisMessage[] }).messages ?? [];
     } catch {
       return; // malformed JSON on this poll — try again next tick.
     }

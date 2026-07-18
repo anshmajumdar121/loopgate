@@ -33,6 +33,10 @@ case "$cmd" in
     if [ "$sub" = "new" ]; then
       session_id="mvs_test_session"
       echo "0" > "$STATE_DIR/$session_id.polls"
+      # The real minimax CLI prints this human-readable line (with ANSI
+      # color codes) before the JSON payload — mavis-bridge.ts must parse
+      # past it, not assume stdout is pure JSON.
+      printf '\033[32mRoot session created: %s [model=minimax/MiniMax-M2.7]\033[0m\n' "$session_id"
       echo "{\"sessionId\":\"$session_id\",\"agentName\":\"test\"}"
       exit 0
     elif [ "$sub" = "messages" ]; then
