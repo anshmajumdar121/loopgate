@@ -70,6 +70,19 @@ function providerEntryFor(c: Connection): ProviderEntry {
           apiKey: c.apiKey ?? "",
         },
       };
+    case "local-cli":
+      // Not actually reachable in practice: local-cli connections run
+      // through the bridge runner's `--cli` path (spawnBridgeRunner),
+      // which never touches this opencode CLI config-fragment path.
+      // Handled here only so this switch stays exhaustive; the entry
+      // itself is inert (no npm SDK talks to a local CLI over HTTP).
+      return {
+        npm: "@ai-sdk/openai",
+        options: {
+          baseURL: c.baseUrl,
+          apiKey: "",
+        },
+      };
   }
 }
 

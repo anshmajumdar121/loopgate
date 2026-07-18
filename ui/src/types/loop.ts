@@ -313,7 +313,8 @@ export interface ModelOption {
 
 export type ConnectionProviderType =
   | "openai-compatible"
-  | "anthropic-compatible";
+  | "anthropic-compatible"
+  | "local-cli";
 
 /** Curated provider ids. Drives the provider dropdown in the Connections UI
  *  — each id maps to a preset with default endpoint, model list, hints.
@@ -324,6 +325,7 @@ export type ConnectionProviderId =
   | "anthropic"
   | "google"
   | "ollama"
+  | "local-cli"
   | "custom";
 
 export interface ConnectionModel {

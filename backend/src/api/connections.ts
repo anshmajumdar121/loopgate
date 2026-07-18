@@ -37,9 +37,9 @@ const connectionSchema = z.object({
   name: z.string().min(1).max(80),
   description: z.string().max(500).optional(),
   providerId: z
-    .enum(["openrouter", "openai", "anthropic", "google", "ollama", "custom"])
+    .enum(["openrouter", "openai", "anthropic", "google", "ollama", "local-cli", "custom"])
     .optional(),
-  providerType: z.enum(["openai-compatible", "anthropic-compatible"]),
+  providerType: z.enum(["openai-compatible", "anthropic-compatible", "local-cli"]),
   baseUrl: z
     .string()
     .url("must be a full URL like https://api.example.com/v1")

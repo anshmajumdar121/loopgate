@@ -433,7 +433,10 @@ export interface FeedbackBody {
 // model picker. Persisted to `_connections.json` on disk.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type ConnectionProviderType = "openai-compatible" | "anthropic-compatible";
+export type ConnectionProviderType =
+  | "openai-compatible"
+  | "anthropic-compatible"
+  | "local-cli";
 
 /** A curated provider id used to drive defaults (endpoint, models, hints)
  *  in the Connections UI. The frontend ships a catalog of presets; users
@@ -445,6 +448,7 @@ export type ConnectionProviderId =
   | "anthropic"
   | "google"
   | "ollama"
+  | "local-cli"
   | "custom";
 
 /** A single model exposed by a Connection. The `id` is what the upstream

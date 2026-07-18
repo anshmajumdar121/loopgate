@@ -11,6 +11,7 @@
 
 import { Hono } from "hono";
 import { getConnection } from "../store/connections.js";
+import type { Connection } from "../types.js";
 import {
   dropConnectionUsage,
   listUsage,
@@ -81,9 +82,20 @@ export function onConnectionDeleted(connectionId: string): void {
 export async function testConnection(connection: {
   baseUrl: string;
   apiKey?: string;
-  providerType: "openai-compatible" | "anthropic-compatible";
+  providerType: Connection["providerType"];
 }): Promise<TestResult> {
   const baseUrl = connection.baseUrl.replace(/\/+$/, "");
+  if (connection.providerType === "local-cli") {
+    // No network endpoint to probe — this connection shells out to the
+    // machine's local `claude` CLI instead of hitting an HTTP API. Absence
+    // of an API key is by design here, not a misconfiguration, so skip the
+    // no-key short-circuit below entirely.
+    return {
+      ok: true,
+      status: "connected",
+      message: "Local CLI mode — no network check needed (uses the machine's `claude` CLI).",
+    };
+  }
   if (!connection.apiKey) {
     return {
       ok: false,

@@ -625,7 +625,11 @@ export async function runLoop(taskId: string): Promise<void> {
         await escalate(taskId, reason, log, emit);
         return false;
       }
-      if (resolved?.connection && !resolved.connection.apiKey) {
+      if (
+        resolved?.connection &&
+        resolved.connection.providerType !== "local-cli" &&
+        !resolved.connection.apiKey
+      ) {
         const reason = `Connection "${resolved.connection.name}" has no API key set. Edit it via Connections → Edit → paste the key.`;
         log("orchestrator", "error", `■ ${reason}`);
         await escalate(taskId, reason, log, emit);

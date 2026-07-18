@@ -162,6 +162,14 @@ function spawnBridgeRunner(
   const baseUrl = connection?.baseUrl ?? "https://integrate.api.nvidia.com/v1";
   const apiKey = connection?.apiKey ?? "";
 
+  // Local-CLI mode: no API key, no network endpoint — the bridge script
+  // shells out to the machine's `claude` CLI instead of an OpenAI-compatible
+  // HTTP endpoint. Triggered either by the resolved connection's providerType
+  // or, for ad-hoc/manual testing without wiring up a connection, the
+  // LOOP_LOCAL_CLI=1 env var.
+  const useLocalCli =
+    connection?.providerType === "local-cli" || process.env.LOOP_LOCAL_CLI === "1";
+
   const args: string[] = [
     // NOTE: do NOT prepend LLM_AGENT_SCRIPT here. The script path is passed
     // to spawn() as the executable's argv[1] (right after the node binary),
@@ -179,7 +187,7 @@ function spawnBridgeRunner(
     "--base-url",
     baseUrl,
     "--api-key",
-    apiKey,
+    useLocalCli ? "" : apiKey,
     "--workdir",
     workdir,
     "--role",
@@ -195,6 +203,9 @@ function spawnBridgeRunner(
     "--temperature",
     "0.7",
   ];
+  if (useLocalCli) {
+    args.push("--cli");
+  }
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,

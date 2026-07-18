@@ -278,6 +278,7 @@ export function resolveConnectionModel(
 export const PROVIDER_TYPES: readonly ConnectionProviderType[] = [
   "openai-compatible",
   "anthropic-compatible",
+  "local-cli",
 ] as const;
 
 /**

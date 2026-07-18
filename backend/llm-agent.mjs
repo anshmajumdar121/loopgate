@@ -10,6 +10,11 @@
 //   --output <path>       where to write the assistant's reply
 //   --max-tokens <n>      default 4096 (maker gets 8192)
 //   --temperature <n>     default 0.7
+//   --cli                 no-API-key mode: shell out to the local `claude`
+//                         CLI (`claude -p <prompt>`) instead of calling an
+//                         OpenAI-compatible endpoint. api-key becomes
+//                         optional when this is set. Override the binary
+//                         via LOOP_CLI_BIN (default "claude").
 //
 // Env overrides (set by the orchestrator's spawner):
 //   LOOP_SYSTEM_PROMPT — full system prompt (overrides file-loaded .md)
@@ -69,6 +74,9 @@ function parseArgs(argv) {
       case "--prompt":
         out.prompt = argv[++i];
         break;
+      case "--cli":
+        out.cli = true;
+        break;
       case "--help":
       case "-h":
         out.help = true;
@@ -105,7 +113,7 @@ for (const k of required) {
   }
 }
 const apiKey = args.apiKey || process.env.LOOP_LLM_API_KEY;
-if (!apiKey) {
+if (!apiKey && !args.cli) {
   console.error("Missing api key");
   process.exit(2);
 }
@@ -251,7 +259,65 @@ try {
   // needed for those phases).
   let result;
   let text = "";
-  if (args.role === "verifier") {
+  let usage = null;
+  let finishReason = "stop";
+  let reasoning = "";
+
+  if (args.cli) {
+    // No-API-key mode: shell the local `claude` CLI instead of calling an
+    // OpenAI-compatible endpoint. Same systemPrompt/userPrompt inputs, same
+    // downstream dispatch — the orchestrator/watcher/parser never know the
+    // difference.
+    const { spawnSync } = await import("node:child_process");
+    const full =
+      (systemPrompt ? systemPrompt + "\n\n---\n\n" : "") + userPrompt;
+    const bin = process.env.LOOP_CLI_BIN || "claude";
+    const r = spawnSync(bin, ["-p", full, "--output-format", "text"], {
+      cwd: args.workdir,
+      encoding: "utf8",
+      timeout: 25 * 60_000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    if (r.error) {
+      process.stderr.write(
+        `llm-agent: FAIL: local CLI spawn error: ${r.error.message}\n`
+      );
+      process.exit(1);
+    }
+    if (r.status !== 0) {
+      process.stderr.write(
+        `llm-agent: FAIL: local CLI exit ${r.status}: ${(r.stderr || "").slice(0, 300)}\n`
+      );
+      process.exit(1);
+    }
+    text = (r.stdout || "").trim();
+    process.stderr.write(
+      `[${args.role}] CLI OK in ${Date.now() - t0}ms, ${text.length} chars\n`
+    );
+
+    // The CLI call is synchronous (no chunks), so the verifier role can't
+    // get the live per-chunk STATE.md append the streaming path uses for
+    // the real-time score UI. Mirror the SAME contract (scaffold once,
+    // then append) as a single write instead of N — the orchestrator's
+    // watcher only cares that STATE.md ends up containing the verdict
+    // section.
+    if (args.role === "verifier" && text) {
+      const verifierStatePath = args.output;
+      try {
+        const { stat } = await import("node:fs/promises");
+        await stat(verifierStatePath);
+      } catch {
+        const attempt = process.env.LOOP_ATTEMPT ?? "1";
+        const scaffold = `# Loop State\n\n## Attempt: ${attempt} / ${process.env.LOOP_MAX_ATTEMPTS ?? "3"}\n\n`;
+        await writeFile(verifierStatePath, scaffold, "utf8");
+      }
+      await appendFile(
+        verifierStatePath,
+        text.startsWith("\n") ? text : "\n" + text,
+        "utf8"
+      );
+    }
+  } else if (args.role === "verifier") {
     // Scaffold STATE.md before streaming so the first chunk appends to
     // a real file. The stream itself doesn't write the scaffold — it
     // just appends chunks. This mirrors the non-streaming path.
@@ -310,9 +376,12 @@ try {
         `(finish=${result.finishReason ?? "?"}, reasoning=${(result.reasoning ?? "").length} chars)\n`
     );
   }
-  const { usage, finishReason } = result;
-  const reasoning =
-    typeof result.reasoning === "string" ? result.reasoning : "";
+
+  if (!args.cli) {
+    usage = result.usage;
+    finishReason = result.finishReason;
+    reasoning = typeof result.reasoning === "string" ? result.reasoning : "";
+  }
 
   // Thinking models (GLM et al.) can return an EMPTY content field: either
   // the token budget was exhausted mid-reasoning (finish=length) or the
@@ -456,12 +525,12 @@ try {
     await appendFile(statePath, summary, "utf8");
     process.stderr.write(`[maker] appended diff summary to ${statePath}\n`);
   } else if (args.role === "verifier") {
-    // Streaming path: text was already appended chunk-by-chunk to
-    // STATE.md as the LLM produced it (see the streamText block above).
-    // This lets the orchestrator parse a live `**Criteria walk:**` and
-    // broadcast a real-time X/Y score to the UI. Nothing more to do here.
+    // Text was already written to STATE.md above — chunk-by-chunk in the
+    // streaming (API) path, or as a single append in the --cli path. Either
+    // way this lets the orchestrator parse the `**Criteria walk:**` /
+    // Verdict section. Nothing more to do here.
     process.stderr.write(
-      `[verifier] streamed ${text.length} chars to ${args.output}\n`
+      `[verifier] wrote ${text.length} chars to ${args.output}\n`
     );
   } else {
     // planner — write the LLM's reply verbatim to GOAL.md (replaces the

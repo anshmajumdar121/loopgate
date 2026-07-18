@@ -125,6 +125,19 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
   {
+    id: "local-cli",
+    name: "Local CLI (no API key)",
+    description:
+      "Runs the loop through your machine's `claude` CLI — no API key, no network endpoint. Uses your existing Claude Code subscription.",
+    providerType: "local-cli",
+    defaultBaseUrl: "http://localhost/local-cli",
+    endpointHint: "(not used in CLI mode)",
+    apiKeyHint: "(not needed)",
+    noKey: true,
+    temperatureDefault: 0.7,
+    models: [],
+  },
+  {
     id: "custom",
     name: "Custom (BYO endpoint)",
     description:
