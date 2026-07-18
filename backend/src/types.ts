@@ -436,7 +436,8 @@ export interface FeedbackBody {
 export type ConnectionProviderType =
   | "openai-compatible"
   | "anthropic-compatible"
-  | "local-cli";
+  | "local-cli"
+  | "mavis-cli";
 
 /** A curated provider id used to drive defaults (endpoint, models, hints)
  *  in the Connections UI. The frontend ships a catalog of presets; users

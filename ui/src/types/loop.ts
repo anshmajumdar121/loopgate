@@ -314,7 +314,8 @@ export interface ModelOption {
 export type ConnectionProviderType =
   | "openai-compatible"
   | "anthropic-compatible"
-  | "local-cli";
+  | "local-cli"
+  | "mavis-cli";
 
 /** Curated provider ids. Drives the provider dropdown in the Connections UI
  *  — each id maps to a preset with default endpoint, model list, hints.
