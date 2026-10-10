@@ -130,6 +130,29 @@ export interface Task {
 }
 
 /**
+ * Row-sized view returned by GET /api/tasks (the list). Mirrors
+ * backend/src/types.ts TaskSummary. It deliberately has no prompt, plan,
+ * diff, verdict, history or logs: fetch GET /api/tasks/:id (see
+ * lib/selectTask.ts) when a task is opened.
+ */
+export type TaskSummary = Pick<
+  Task,
+  | "id"
+  | "title"
+  | "workdir"
+  | "status"
+  | "attempt"
+  | "maxAttempts"
+  | "createdAt"
+  | "updatedAt"
+  | "model"
+  | "escalationReason"
+  | "previewUrl"
+  | "projectId"
+  | "sessionId"
+>;
+
+/**
  * Per-attempt timeline row. Mirrors backend/src/types.ts AttemptRecord.
  * Every field is optional because the orchestrator may not reach every
  * phase (e.g. a maker crash skips runtime + verify). The UI renders

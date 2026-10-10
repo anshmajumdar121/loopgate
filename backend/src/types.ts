@@ -305,6 +305,30 @@ export interface Task {
 }
 
 /**
+ * Row-sized view of a Task for list endpoints (the sidebar). Deliberately an
+ * allowlist: the full Task carries prompt, logs (up to 500 lines), plan, diff
+ * and history, which made a 900-task list ~240 KB per call. Anything not named
+ * here must be fetched with GET /tasks/:id.
+ */
+export type TaskSummary = Pick<
+  Task,
+  | "id"
+  | "title"
+  | "workdir"
+  | "status"
+  | "attempt"
+  | "maxAttempts"
+  | "createdAt"
+  | "updatedAt"
+  | "model"
+  | "modelOverrides"
+  | "escalationReason"
+  | "previewUrl"
+  | "projectId"
+  | "sessionId"
+>;
+
+/**
  * Agent role → group key on `Task.modelOverrides`. Used by the orchestrator
  * when spawning each agent to pick the right override. Single source of
  * truth — add a role here and the orchestrator picks the correct model.

@@ -24,10 +24,10 @@ import {
 import { useTaskList } from "@/lib/useTaskList";
 import { useProjectList, useSessionList } from "@/lib/useProjectTree";
 import { useWorkflow } from "@/lib/store";
-import { useLoopSocket } from "@/hooks/useLoopSocket";
 import { cn } from "@/lib/utils";
 import { NewProjectModal } from "@/components/NewProjectModal";
-import type { Project, Session, Task, TaskStatus } from "@/types/loop";
+import type { Project, Session, TaskSummary, TaskStatus } from "@/types/loop";
+import { useSelectTask } from "@/lib/selectTask";
 
 export type SidebarView = "workflow" | "connections" | "improve";
 
@@ -113,14 +113,10 @@ export function Sidebar({ onNewTask, activeView, onNavigate }: SidebarProps) {
 function TasksSection({ onNewTask }: { onNewTask: () => void }) {
   const { tasks, loading, error, refresh } = useTaskList();
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
-  const loadTask = useWorkflow((s) => s.loadTask);
+  const selectTaskById = useSelectTask();
   const isRunning = useWorkflow((s) => s.isRunning);
-  const { subscribe } = useLoopSocket();
 
-  const handleSelect = (task: Task) => {
-    loadTask(task);
-    subscribe(task.id);
-  };
+  const handleSelect = (task: TaskSummary) => selectTaskById(task.id);
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -207,7 +203,7 @@ function TaskRow({
   onSelect,
   onDelete,
 }: {
-  task: Task;
+  task: TaskSummary;
   isActive: boolean;
   onSelect: () => void;
   onDelete: (e: React.MouseEvent) => void;
@@ -367,7 +363,7 @@ function ProjectTree({
   onProjectChanged,
 }: {
   project: Project;
-  tasks: Task[];
+  tasks: TaskSummary[];
   onTaskChanged: () => void;
   onProjectChanged: () => void;
 }) {
@@ -452,7 +448,7 @@ function SessionsList({
   onSessionsChanged,
 }: {
   projectId: string;
-  tasks: Task[];
+  tasks: TaskSummary[];
   onTaskChanged: () => void;
   onSessionsChanged: () => void;
 }) {
@@ -539,7 +535,7 @@ function SessionTree({
   onSessionsChanged,
 }: {
   session: Session;
-  tasks: Task[];
+  tasks: TaskSummary[];
   onTaskChanged: () => void;
   onSessionsChanged: () => void;
 }) {
@@ -621,17 +617,13 @@ function TasksUnderSession({
   tasks,
   onTaskChanged,
 }: {
-  tasks: Task[];
+  tasks: TaskSummary[];
   onTaskChanged: () => void;
 }) {
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
-  const loadTask = useWorkflow((s) => s.loadTask);
-  const { subscribe } = useLoopSocket();
+  const selectTaskById = useSelectTask();
 
-  const handleSelect = (task: Task) => {
-    loadTask(task);
-    subscribe(task.id);
-  };
+  const handleSelect = (task: TaskSummary) => selectTaskById(task.id);
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -692,17 +684,13 @@ function SessionlessTasks({
   tasks,
   onTaskChanged,
 }: {
-  tasks: Task[];
+  tasks: TaskSummary[];
   onTaskChanged: () => void;
 }) {
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
-  const loadTask = useWorkflow((s) => s.loadTask);
-  const { subscribe } = useLoopSocket();
+  const selectTaskById = useSelectTask();
 
-  const handleSelect = (task: Task) => {
-    loadTask(task);
-    subscribe(task.id);
-  };
+  const handleSelect = (task: TaskSummary) => selectTaskById(task.id);
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();

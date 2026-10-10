@@ -8,6 +8,7 @@ import {
   listTasks,
   removeTask,
   resolveEvent,
+  toTaskSummary,
 } from "../store/tasks.js";
 import { runLoop, stopLoop, isLoopRunning, resumeLoop, resetTask, rePrompt } from "../loop/orchestrator.js";
 import { isActiveStatus } from "../store/persistence.js";
@@ -51,7 +52,7 @@ tasksApi.get("/health", (c) => c.json({ status: "ok", uptime: process.uptime() }
 
 // List
 tasksApi.get("/tasks", (c) => {
-  return c.json({ tasks: listTasks() });
+  return c.json({ tasks: listTasks().map(toTaskSummary) });
 });
 
 /**

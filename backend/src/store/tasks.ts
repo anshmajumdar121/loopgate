@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve as pathResolve } from "node:path";
-import type { LogEntry, Task, TaskStatus } from "../types.js";
+import type { LogEntry, Task, TaskStatus, TaskSummary } from "../types.js";
 import {
   deleteTaskFile,
   isActiveStatus,
@@ -176,6 +176,25 @@ export function previewWorkdir(
 
 export function getTask(id: string): Task | undefined {
   return store.tasks.get(id);
+}
+
+export function toTaskSummary(task: Task): TaskSummary {
+  return {
+    id: task.id,
+    title: task.title,
+    workdir: task.workdir,
+    status: task.status,
+    attempt: task.attempt,
+    maxAttempts: task.maxAttempts,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    model: task.model,
+    modelOverrides: task.modelOverrides,
+    escalationReason: task.escalationReason,
+    previewUrl: task.previewUrl,
+    projectId: task.projectId,
+    sessionId: task.sessionId,
+  };
 }
 
 export function listTasks(): Task[] {
