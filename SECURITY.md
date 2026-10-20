@@ -28,6 +28,11 @@ These behaviours are exercised by `npm run demo:trust` in `backend/`.
 address, and do not put it behind a tunnel or reverse proxy, unless you add your own
 authentication in front of it.
 
+The one exception is **public demo mode** (`LOOP_PUBLIC_DEMO=1`): it runs only the bundled
+offline fake LLM, refuses connection writes, workdirs and filesystem endpoints, confines
+writes to temp dirs and caps run volume, so there is nothing worth stealing. See
+[docs/DEPLOY_DEMO.md](docs/DEPLOY_DEMO.md) for what it locks down and its limits.
+
 ## Reporting a vulnerability
 
 Please report issues privately through GitHub security advisories (the repository's

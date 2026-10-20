@@ -8,6 +8,8 @@
 
 ![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
+🌐 **Live demo:** _coming soon_ <!-- LIVE_DEMO_URL: replace "_coming soon_" with your Render URL, e.g. https://loopgate-demo.onrender.com — see docs/DEPLOY_DEMO.md --> (public sandbox on the offline fake LLM; resets on restart. [Host your own](docs/DEPLOY_DEMO.md).)
+
 ## Try it in 60 seconds (no API key, no network)
 
 ```bash
@@ -129,6 +131,7 @@ Each item runs as a normal task in `<workdir>/item-NNN/` with `autoApprovePlan` 
 | `LOOP_WORKSPACES_ROOT` | `~/LoopAgent-workspaces` | default task/batch workdirs |
 | `LOOP_ENFORCE_ALLOWLIST` | on | set `0` to allow writes outside `Files to touch` (reserved files and the denylist always apply) |
 | `LOOP_ALLOW_MOCK` | off | explicit opt-in to mock agents |
+| `LOOP_PUBLIC_DEMO` | off | `1` = locked-down public demo: fake LLM only, read-only connections, temp dirs, capped runs, serves the built UI ([docs/DEPLOY_DEMO.md](docs/DEPLOY_DEMO.md)) |
 
 ## Tests
 
@@ -152,5 +155,6 @@ cd ui && npm test          # 40 tests
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, tests and PR expectations
 - [SECURITY.md](SECURITY.md): threat model, known gaps and private reporting
+- [docs/DEPLOY_DEMO.md](docs/DEPLOY_DEMO.md): host a safe public demo (Render, free)
 - [docs/LAUNCH.md](docs/LAUNCH.md): launch and outreach plan
 - [LICENSE](LICENSE): MIT

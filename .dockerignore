@@ -1,0 +1,12 @@
+# Never ship local state: backend/data holds _connections.json (plaintext API keys).
+**/node_modules
+**/dist
+backend/data
+backend/.loop
+**/.env
+**/.env.*
+.git
+.claude
+.opencode
+docs
+*.log
