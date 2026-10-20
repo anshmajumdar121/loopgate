@@ -9,6 +9,7 @@ import {
   saveTask,
   TASK_DATA_DIR,
 } from "./persistence.js";
+import { DEMO_MODEL, isPublicDemo, isWithinDir } from "../demo/publicDemo.js";
 
 interface Store {
   tasks: Map<string, Task>;
@@ -61,6 +62,21 @@ export function createTask(input: {
   autoIterate?: boolean;
   batchId?: string;
 }): Task {
+  if (isPublicDemo()) {
+    // Public demo: every role runs on the bundled fake LLM, nothing reads
+    // the server's files, and no run can park waiting for a human (that
+    // would hold the single-active-run slot for every visitor).
+    input = {
+      ...input,
+      model: DEMO_MODEL,
+      modelOverrides: { planning: DEMO_MODEL, implementation: DEMO_MODEL, review: DEMO_MODEL },
+      projectId: undefined,
+      sessionId: undefined,
+      contextFiles: undefined,
+      autoApprovePlan: true,
+      autoIterate: true,
+    };
+  }
   const id = nanoid(12);
   const now = new Date().toISOString();
   // Strip empty-string entries so a missing override stays `undefined`
@@ -89,6 +105,9 @@ export function createTask(input: {
     sessionId,
     taskId: id,
   });
+  if (isPublicDemo() && !isWithinDir(TASK_WORKSPACES_ROOT, resolvedWorkdir)) {
+    throw new Error(`public demo: workdir ${resolvedWorkdir} is outside ${TASK_WORKSPACES_ROOT}`);
+  }
 
   const task: Task = {
     id,

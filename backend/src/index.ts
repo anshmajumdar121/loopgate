@@ -1,3 +1,6 @@
+// Must stay first: fixes up the env for public demo mode before the stores
+// read it at module evaluation (see demo/bootstrap.ts).
+import "./demo/bootstrap.js";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { createServer } from "node:http";
@@ -27,14 +30,19 @@ import {
 } from "./store/persistence.js";
 import { loadProjectsFromDisk } from "./store/projects.js";
 import { loadSessionsFromDisk } from "./store/sessions.js";
-import { loadConnectionsFromDisk } from "./store/connections.js";
-import { loadTasksFromDisk } from "./store/tasks.js";
+import { installPublicDemoConnection, loadConnectionsFromDisk } from "./store/connections.js";
+import { listTasks, loadTasksFromDisk } from "./store/tasks.js";
+import { getBatch } from "./store/batches.js";
 import { loadUsageFromDisk } from "./store/tokenUsage.js";
 import { startConnectionHealthMonitor } from "./loop/connection-health.js";
 import { createHttpHandler, resolveMaxBodyBytes } from "./http/handler.js";
 import { buildAllowedHostnames } from "./http/security.js";
 import { installProcessGuards } from "./http/processGuards.js";
 import { createVerifyClient, WS_MAX_CLIENTS, WS_MAX_PAYLOAD_BYTES } from "./http/wsGuard.js";
+import { isPublicDemo, platformHostnames, publicDemoLimits, startPublicDemoLlm } from "./demo/publicDemo.js";
+import { createPublicDemoApp } from "./demo/guard.js";
+import { createStaticUi } from "./http/staticUi.js";
+import { resolve as pathResolve } from "node:path";
 
 const app = new Hono();
 
@@ -53,8 +61,32 @@ const PORT = Number(process.env.PORT || 3001);
 // Loopback by default: this API drives local agents with filesystem access.
 // Set LOOP_HOST=0.0.0.0 (plus LOOP_ALLOWED_HOSTS) to expose it deliberately.
 const HOST = process.env.LOOP_HOST || "127.0.0.1";
-const ALLOWED_HOSTS = buildAllowedHostnames(process.env.LOOP_ALLOWED_HOSTS);
+const PUBLIC_DEMO = isPublicDemo();
+const ALLOWED_HOSTS = buildAllowedHostnames(
+  [process.env.LOOP_ALLOWED_HOSTS, ...(PUBLIC_DEMO ? platformHostnames() : [])].filter(Boolean).join(",")
+);
 const MAX_BODY_BYTES = resolveMaxBodyBytes(process.env.LOOP_MAX_BODY_BYTES);
+
+// Public demo mode: start the bundled fake LLM (the only model the demo can
+// run), put the default-deny gate in front of every route and serve the
+// built UI from this same origin. See demo/publicDemo.ts.
+let fetchApp: Parameters<typeof createHttpHandler>[0] = app;
+if (PUBLIC_DEMO) {
+  const llm = await startPublicDemoLlm();
+  installPublicDemoConnection(llm.connection);
+  const uiDir = process.env.LOOP_UI_DIST || pathResolve(process.cwd(), "..", "ui", "dist");
+  const serveUi = await createStaticUi(uiDir);
+  console.log(
+    `[loop-agent-backend] demo LLM at ${llm.connection.baseUrl}; UI ${serveUi ? `served from ${uiDir}` : `not built (${uiDir} missing) — API only`}`
+  );
+  fetchApp = createPublicDemoApp(app, {
+    limits: publicDemoLimits(),
+    taskCount: () => listTasks().length,
+    batchRerunCount: (id) =>
+      getBatch(id)?.items.filter((it) => it.status !== "done" && it.status !== "escalated").length,
+    serveUi,
+  });
+}
 
 // A stray rejection/throw must never take the backend down; log loudly instead.
 installProcessGuards();
@@ -63,7 +95,7 @@ installProcessGuards();
 // createHttpHandler adds Host/Origin allowlisting, a body cap (413), 400 on
 // malformed request-targets and 500 on any other failure — it never rejects.
 const httpServer = createServer(
-  createHttpHandler(app, {
+  createHttpHandler(fetchApp, {
     port: PORT,
     allowedHosts: ALLOWED_HOSTS,
     maxBodyBytes: MAX_BODY_BYTES,
@@ -117,7 +149,9 @@ httpServer.listen(PORT, HOST, async () => {
     loadTasksFromDisk(loaded);
     loadProjectsFromDisk(projects);
     loadSessionsFromDisk(sessions);
-    loadConnectionsFromDisk(connections);
+    // Public demo never loads stored connections (they may hold real keys):
+    // the in-memory demo LLM installed above is the only one.
+    if (!PUBLIC_DEMO) loadConnectionsFromDisk(connections);
     loadUsageFromDisk(usage);
     console.log(
       `[loop-agent-backend] loaded ${loaded.length} task(s), ${projects.length} project(s), ${sessions.length} session(s), ${connections.length} connection(s), ${usage.length} token-usage entry(s) from disk` +

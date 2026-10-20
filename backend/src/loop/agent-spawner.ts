@@ -33,6 +33,7 @@ import { recordUsage } from "../store/tokenUsage.js";
 import { writeTrace, type TraceRecord, type TraceRole } from "../store/traces.js";
 import { spawnMavisBridge } from "./mavis-bridge.js";
 import { loadSystemPromptForRole } from "./role-prompts.js";
+import { assertPublicDemoSpawn, isPublicDemo } from "../demo/publicDemo.js";
 
 /**
  * Bridge runner that bypasses the `opencode` CLI subprocess. Why this
@@ -450,6 +451,10 @@ export function spawnAgent(
   onExit: ExitCallback,
   options?: SpawnAgentOptions
 ): AgentHandle {
+  // Public demo: the only thing allowed to run is the in-process fake LLM
+  // (no real providers, no local claude / Mavis CLI, no opencode, no mocks).
+  if (isPublicDemo()) assertPublicDemoSpawn(options?.connection);
+
   // If a previous agent for this task is still alive (shouldn't happen in
   // normal flow, but defensive), kill it first to avoid orphaned processes.
   const previous = AGENT_HANDLES.get(taskId);

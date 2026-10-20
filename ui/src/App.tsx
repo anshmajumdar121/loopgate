@@ -15,6 +15,7 @@ import { ChatbotLab } from "@/pages/ChatbotLab";
 import { BatchPanel } from "@/components/batch/BatchPanel";
 import { selectTask } from "@/lib/selectTask";
 import { useFollowActiveTask } from "@/lib/useFollowActiveTask";
+import { PublicDemoBanner } from "@/components/PublicDemoBanner";
 
 export default function App() {
   // Dev-only escape hatch: /chatbot-lab renders the lab page instead of
@@ -125,6 +126,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-white text-zinc-900 transition-colors duration-200 dark:bg-zinc-950 dark:text-zinc-100">
+      <PublicDemoBanner />
       <TopBar
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onNewTask={handleNewTask}

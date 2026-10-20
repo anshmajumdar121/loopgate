@@ -20,6 +20,7 @@ import {
   loadAllConnections,
   saveConnections,
 } from "./persistence.js";
+import { isPublicDemo } from "../demo/publicDemo.js";
 
 interface ConnectionStore {
   connections: Connection[];
@@ -56,7 +57,19 @@ export function getConnectionSummary(
   return c ? toSummary(c) : undefined;
 }
 
+/** Public demo: connections are read-only (the HTTP gate refuses first). */
+function assertWritable(): void {
+  if (isPublicDemo()) throw new Error("public demo: connections are read-only");
+}
+
+/** Public demo: replace every connection with the in-memory demo LLM. Not
+ *  persisted, and nothing from the data dir's _connections.json is loaded. */
+export function installPublicDemoConnection(connection: Connection): void {
+  connectionStore.connections = [connection];
+}
+
 export function createConnection(input: UpsertConnectionBody): Connection {
+  assertWritable();
   const now = new Date().toISOString();
   const connection: Connection = buildConnectionRecord(input, now, {
     apiKey: input.apiKey?.trim() || undefined,
@@ -74,6 +87,7 @@ export function updateConnection(
   id: string,
   input: UpsertConnectionBody
 ): Connection | undefined {
+  assertWritable();
   const idx = connectionStore.connections.findIndex((c) => c.id === id);
   if (idx === -1) return undefined;
   const existing = connectionStore.connections[idx];
@@ -164,6 +178,7 @@ function clampTemperature(t: number | undefined): number | undefined {
 }
 
 export function deleteConnection(id: string): boolean {
+  assertWritable();
   const idx = connectionStore.connections.findIndex((c) => c.id === id);
   if (idx === -1) return false;
   connectionStore.connections.splice(idx, 1);
