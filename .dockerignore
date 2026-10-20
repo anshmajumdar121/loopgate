@@ -1,0 +1,9 @@
+backend/node_modules
+backend/data
+backend/dist
+ui/node_modules
+ui/dist
+.git
+.gitignore
+loop-rt/node_modules
+loop-rt/**/dist

@@ -18,6 +18,7 @@ import {
   usageTotals,
 } from "../store/tokenUsage.js";
 import { recordHealthResult } from "../loop/connection-health.js";
+import { withProbeTimeout } from "../loop/v2/probe-timeout.js";
 
 export const connectionMetaApi = new Hono();
 
@@ -29,6 +30,11 @@ export interface TestResult {
   /** Echoed for the UI's badge — which endpoint was reached. */
   endpoint?: string;
 }
+
+export const CONNECTION_PROBE_TIMEOUT_MS = Math.max(
+  1,
+  Number(process.env.LOOP_CONNECTION_PROBE_TIMEOUT_MS || 10_000)
+);
 
 connectionMetaApi.post("/connections/:id/test", async (c) => {
   const id = c.req.param("id");
@@ -113,21 +119,30 @@ export async function testConnection(connection: {
       message: "No API key set — edit the connection to add one.",
     };
   }
+  const apiKey = connection.apiKey;
   const start = Date.now();
   const primaryUrl =
     connection.providerType === "anthropic-compatible"
       ? `${baseUrl}/v1/models`
       : `${baseUrl}/models`;
   try {
-    const res = await fetch(primaryUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${connection.apiKey}`,
-        "x-api-key": connection.apiKey,
-        // Anthropic expects the anthropic-version header on every call.
-        "anthropic-version": "2023-06-01",
-      },
-    });
+    const res = await withProbeTimeout(
+      (signal) =>
+        fetch(primaryUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "x-api-key": apiKey,
+            // Anthropic expects the anthropic-version header on every call.
+            "anthropic-version": "2023-06-01",
+          },
+          signal,
+        }),
+      {
+        timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,
+        label: `connection probe ${primaryUrl}`,
+      }
+    );
     const latencyMs = Date.now() - start;
     if (res.ok) {
       return {
@@ -151,7 +166,13 @@ export async function testConnection(connection: {
       // Provider doesn't expose /models — try a HEAD on the baseUrl itself
       // so a "chat-only" provider still passes.
       try {
-        const head = await fetch(baseUrl, { method: "HEAD" });
+        const head = await withProbeTimeout(
+          (signal) => fetch(baseUrl, { method: "HEAD", signal }),
+          {
+            timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,
+            label: `connection probe ${baseUrl}`,
+          }
+        );
         const headLatency = Date.now() - start;
         if (head.ok || (head.status >= 200 && head.status < 500)) {
           return {

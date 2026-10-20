@@ -82,7 +82,9 @@ deterministic fake LLM. It never touches your data and makes no paid API calls.
 
 ## Quick start
 
-Requires Node 20+. Verified tonight on Node 24 + Windows 11; macOS was the original development platform.
+Requires Node 22.23.3 (pinned in `.nvmrc`; newer Node 22.x should also work). The backend
+uses SQLite and a structured process runner, so use the pinned runtime for reproducible
+native-module installs.
 
 ```bash
 cd backend && npm install && npm run dev      # API on 127.0.0.1:3001
@@ -127,6 +129,9 @@ Each item runs as a normal task in `<workdir>/item-NNN/` with `autoApprovePlan` 
 | `LOOP_MAX_BODY_BYTES` | `10485760` | request body cap |
 | `LOOP_DATA_DIR` | `backend/data/tasks` | persistence (projects/connections/batches live one level up) |
 | `LOOP_WORKSPACES_ROOT` | `~/LoopAgent-workspaces` | default task/batch workdirs |
+| `LOOP_ENGINE` | `legacy` | set to `v2` to enable the Phase A event-log shadow engine |
+| `LOOP_EVENT_LOG_PATH` | derived from `LOOP_DATA_DIR` | SQLite event-log location when `LOOP_ENGINE=v2` |
+| `LOOP_CONNECTION_PROBE_TIMEOUT_MS` | `10000` | connection health/preflight deadline |
 | `LOOP_ENFORCE_ALLOWLIST` | on | set `0` to allow writes outside `Files to touch` (reserved files and the denylist always apply) |
 | `LOOP_ALLOW_MOCK` | off | explicit opt-in to mock agents |
 

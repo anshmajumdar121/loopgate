@@ -20,8 +20,8 @@
 
 import { readFile, access, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { runProcess } from "./v2/process-runner.js";
 
 export interface BuildRunResult {
   installMs?: number;
@@ -111,32 +111,6 @@ export function scrubbedEnv(
     }
   }
   return env;
-}
-
-/** Kill a stage and everything it spawned (npm → sh/cmd → node ...). */
-function killTree(proc: ChildProcess): void {
-  const pid = proc.pid;
-  if (pid === undefined) return;
-  if (IS_WIN32) {
-    try {
-      // /T = whole tree, /F = force. Fire-and-forget; errors (already
-      // exited) are irrelevant.
-      const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      killer.on("error", () => proc.kill("SIGKILL"));
-    } catch {
-      proc.kill("SIGKILL");
-    }
-    return;
-  }
-  try {
-    // Negative pid = the whole process group (child was spawned detached).
-    process.kill(-pid, "SIGKILL");
-  } catch {
-    proc.kill("SIGKILL");
-  }
 }
 
 /**
@@ -249,57 +223,28 @@ function runStage(
   npmArgs: string[],
   timeoutMs: number
 ): Promise<StageResult> {
-  const start = Date.now();
-  return new Promise((resolve) => {
-    // On Windows npm is a .cmd shim, which CreateProcess can't execute
-    // without a shell. shell:true is safe here: args are fixed literals
-    // from this module (install/run build/run test), never user strings.
-    // They're pre-joined into one command string (no args array) so Node
-    // doesn't emit DEP0190 for shell:true + args.
-    const proc = IS_WIN32
-      ? spawn(["npm.cmd", ...npmArgs].join(" "), {
-          cwd: workdir,
-          env: scrubbedEnv(),
-          stdio: ["ignore", "pipe", "pipe"],
-          shell: true,
-          windowsHide: true,
-        })
-      : spawn("npm", npmArgs, {
-          cwd: workdir,
-          env: scrubbedEnv(),
-          stdio: ["ignore", "pipe", "pipe"],
-          shell: false,
-          // Own process group so a timeout can kill(-pid) the whole tree.
-          detached: true,
-        });
-    const lines: string[] = [];
-    const capture = (chunk: Buffer) => {
-      for (const line of chunk.toString("utf8").split("\n")) {
-        lines.push(line);
-        if (lines.length > TAIL_LINES * 2) lines.splice(0, lines.length - TAIL_LINES);
-      }
+  const executable = IS_WIN32 ? "npm.cmd" : "npm";
+  return runProcess({
+    executable,
+    args: npmArgs,
+    cwd: workdir,
+    env: scrubbedEnv(),
+    extendEnv: false,
+    timeoutMs,
+    stdoutTailBytes: 256 * 1024,
+    stderrTailBytes: 256 * 1024,
+  }).then((result) => {
+    const output = [result.stdoutTail, result.stderrTail]
+      .filter((part) => part.length > 0)
+      .join("\n")
+      .split("\n");
+    if (result.timedOut) {
+      output.push(`(stage timed out after ${timeoutMs / 1000}s and was killed)`);
+    }
+    return {
+      exit: result.exitCode ?? 1,
+      durationMs: result.durationMs,
+      tail: output.slice(-TAIL_LINES).join("\n").trim(),
     };
-    proc.stdout.on("data", capture);
-    proc.stderr.on("data", capture);
-    const timer = setTimeout(() => {
-      killTree(proc);
-      lines.push(`(stage timed out after ${timeoutMs / 1000}s and was killed)`);
-    }, timeoutMs);
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({
-        exit: 127,
-        durationMs: Date.now() - start,
-        tail: `failed to spawn npm: ${err.message}`,
-      });
-    });
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({
-        exit: code ?? 1,
-        durationMs: Date.now() - start,
-        tail: lines.slice(-TAIL_LINES).join("\n").trim(),
-      });
-    });
   });
 }

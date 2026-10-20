@@ -31,6 +31,13 @@ import { loadConnectionsFromDisk } from "./store/connections.js";
 import { loadTasksFromDisk } from "./store/tasks.js";
 import { loadUsageFromDisk } from "./store/tokenUsage.js";
 import { startConnectionHealthMonitor } from "./loop/connection-health.js";
+import { stopConnectionHealthMonitor } from "./loop/connection-health.js";
+import { closeEngineResources, stopAllLoops } from "./loop/orchestrator.js";
+import { stopPreviewServer } from "./loop/preview-server.js";
+import {
+  installShutdownHandlers,
+  ShutdownCoordinator,
+} from "./loop/v2/shutdown-coordinator.js";
 import { createHttpHandler, resolveMaxBodyBytes } from "./http/handler.js";
 import { buildAllowedHostnames } from "./http/security.js";
 import { installProcessGuards } from "./http/processGuards.js";
@@ -94,6 +101,51 @@ wss.on("error", (err) => {
 });
 
 broadcaster.attach(wss);
+
+// Shutdown is explicit and idempotent. The coordinator aborts the shared
+// signal first, then closes loop resources and servers without leaving child
+// agents or health-check timers behind on SIGINT/SIGTERM.
+export const shutdownCoordinator = new ShutdownCoordinator();
+shutdownCoordinator.register(() => stopAllLoops());
+shutdownCoordinator.register(() => closeEngineResources());
+shutdownCoordinator.register(() => stopConnectionHealthMonitor());
+shutdownCoordinator.register(() => stopPreviewServer());
+shutdownCoordinator.register(
+  () =>
+    new Promise<void>((resolve, reject) => {
+      try {
+        for (const client of wss.clients) client.terminate();
+        wss.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      } catch (error) {
+        reject(error);
+      }
+    })
+);
+shutdownCoordinator.register(
+  () =>
+    new Promise<void>((resolve, reject) => {
+      if (!httpServer.listening) {
+        resolve();
+        return;
+      }
+      httpServer.close((error) => {
+        if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    })
+);
+installShutdownHandlers(shutdownCoordinator, {
+  onError: (error) => console.error("[loop-agent-backend] shutdown failed:", error),
+});
 
 httpServer.listen(PORT, HOST, async () => {
   const shownHost = HOST.includes(":") ? `[${HOST}]` : HOST;

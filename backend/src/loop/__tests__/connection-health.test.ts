@@ -19,6 +19,7 @@ process.env.LOOP_DATA_DIR = join(
   mkdtempSync(join(tmpdir(), "loop-health-test-")),
   "tasks"
 );
+process.env.LOOP_CONNECTION_PROBE_TIMEOUT_MS = "25";
 
 const {
   createConnection,
@@ -235,5 +236,23 @@ describe("connection-health: pre-flight (ensureFreshHealth)", () => {
     failingHosts.delete("recover.example");
     const h = await ensureFreshHealth(getConnection(conn.id)!);
     expect(h.ok).toBe(true);
+  });
+
+  it("fails a hanging probe instead of waiting forever", async () => {
+    const conn = makeConn("hanging", "hanging.example");
+    fetchSpy.mockImplementationOnce((...args: unknown[]) => {
+      const init = args[1] as RequestInit | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason),
+          { once: true }
+        );
+      });
+    });
+
+    const h = await ensureFreshHealth(getConnection(conn.id)!);
+    expect(h.ok).toBe(false);
+    expect(h.error).toMatch(/timed out after 25ms/i);
   });
 });

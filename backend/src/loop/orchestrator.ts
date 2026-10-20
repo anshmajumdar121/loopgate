@@ -64,6 +64,7 @@ import {
   resolveConnectionModel,
 } from "../store/connections.js";
 import { ensureFreshHealth } from "./connection-health.js";
+import { closeV2EventLogs, isV2EngineEnabled, runLoopV2 } from "./v2/engine.js";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 
@@ -320,6 +321,16 @@ export function stopLoop(taskId: string): void {
   }
 }
 
+/** Stop every legacy/v2 loop during process shutdown. */
+export function stopAllLoops(): void {
+  for (const taskId of [...ACTIVE_LOOPS]) stopLoop(taskId);
+}
+
+/** Close the v2 event-log handles after all live loops have been stopped. */
+export function closeEngineResources(): void {
+  closeV2EventLogs();
+}
+
 /**
  * Helper for the orchestrator body: returns true if the task was cancelled
  * since the last await/phase, and logs the appropriate banner. Call sites:
@@ -505,7 +516,7 @@ export function rePrompt(taskId: string, newPrompt: string): boolean {
  * Any unhandled error is captured into the task's status as "escalated" and
  * broadcast as a WS `error` event.
  */
-export async function runLoop(taskId: string): Promise<void> {
+export async function runLoopLegacy(taskId: string): Promise<void> {
   if (ACTIVE_LOOPS.has(taskId)) {
     throw new Error("Loop already running for this task");
   }
@@ -2094,6 +2105,19 @@ try {
     LAST_FEEDBACK.delete(taskId);
     clearPendingResolvers(taskId);
   }
+}
+
+/**
+ * Engine dispatcher. Phase A keeps the proven legacy loop as the behavior
+ * implementation, while LOOP_ENGINE=v2 adds the durable run/item projection
+ * around it. This makes the new engine observable and resumable without
+ * changing the trust-demo's user-visible behavior yet.
+ */
+export async function runLoop(taskId: string): Promise<void> {
+  if (!isV2EngineEnabled()) {
+    return runLoopLegacy(taskId);
+  }
+  return runLoopV2(taskId, runLoopLegacy);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
