@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   MessageSquare,
   ListChecks,
+  Map as MapIcon,
   ExternalLink,
   type LucideIcon,
 } from "lucide-react";
@@ -27,7 +28,8 @@ export type NodeKind =
   | "end-success"
   | "end-escalated"
   | "chatbot"
-  | "progress";
+  | "progress"
+  | "map";
 
 export type RunStatus =
   | "idle"
@@ -87,6 +89,7 @@ export const iconRegistry: Record<string, LucideIcon> = {
   escalated: AlertTriangle,
   chatbot: MessageSquare,
   progress: ListChecks,
+  map: MapIcon,
   live_preview: ExternalLink,
 };
 
@@ -202,6 +205,13 @@ export const nodeSpecs: NodeSpec[] = [
     subtitle: "Live status of every step in the loop.",
     iconName: "progress",
   },
+  {
+    id: "map",
+    kind: "map",
+    title: "Map",
+    subtitle: "Run one loop across many items.",
+    iconName: "map",
+  },
 ];
 
 export const edgeSpecs: EdgeSpec[] = [
@@ -277,6 +287,15 @@ export const edgeSpecs: EdgeSpec[] = [
   // Orchestrator → progress. The progress node mirrors live state of
   // every step so the user always sees where they are.
   { id: "e14", source: "orchestrator", target: "progress", color: "muted" },
+  // Orchestrator → Map. Batch items are dispatched by the same loop driver,
+  // while the node mirrors their per-item state from the batch store.
+  {
+    id: "e15",
+    source: "orchestrator",
+    target: "map",
+    targetHandle: "from-orchestrator",
+    color: "muted",
+  },
 ];
 
 /**

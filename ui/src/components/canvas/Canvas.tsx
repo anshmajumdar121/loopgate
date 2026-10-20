@@ -14,6 +14,7 @@ import "@xyflow/react/dist/style.css";
 import { WorkflowNode } from "./WorkflowNode";
 import { ChatbotNode } from "./ChatbotNode";
 import { ProgressNode } from "./ProgressNode";
+import { MapNode } from "./MapNode";
 import { AnimatedEdge } from "./AnimatedEdge";
 import { useWorkflow } from "@/lib/store";
 import type { WorkflowNodeData } from "@/lib/layout";
@@ -21,11 +22,12 @@ import { RunButton } from "./RunButton";
 import { CanvasToolbar } from "./CanvasToolbar";
 
 // React Flow's `nodeTypes` map. The keys here must match the `type`
-// field set by `layoutFromSpec` (workflow / chatbot / progress).
+// field set by `layoutFromSpec` (workflow / chatbot / progress / map).
 const nodeTypes = {
   workflow: WorkflowNode,
   chatbot: ChatbotNode,
   progress: ProgressNode,
+  map: MapNode,
 };
 const edgeTypes = { animated: AnimatedEdge };
 

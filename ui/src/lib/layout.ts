@@ -9,6 +9,8 @@ export const NODE_HEIGHT = 52;
  *  need to be wider/taller. The default applies to pill nodes. */
 export const RICH_NODE_WIDTH = 380;
 export const RICH_NODE_HEIGHT = 280;
+export const MAP_NODE_WIDTH = 400;
+export const MAP_NODE_HEIGHT = 430;
 export const RANK_SEP = 130;
 export const NODE_SEP = 60;
 
@@ -46,9 +48,10 @@ function getIcon(name: string) {
  * are offset left so they sit beside the spine, not on top of it.
  */
 const MANUAL_POSITIONS: Record<string, { x: number; y: number }> = {
-  // Rich-UI nodes (left of the main spine)
+  // Rich-UI nodes around the main spine
   chatbot: { x: -180, y: 260 },
   progress: { x: -180, y: 780 },
+  map: { x: 700, y: 0 },
   // Main spine (x=370 puts the node centered on x=480)
   task: { x: 370, y: 0 },
   orchestrator: { x: 370, y: 130 },
@@ -74,11 +77,12 @@ export function layoutFromSpec(
 ): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
   const nodes: Node<WorkflowNodeData>[] = nodeSpecs.map((spec) => {
     const pos = MANUAL_POSITIONS[spec.id] ?? { x: 0, y: 0 };
-    // Rich-UI node kinds (chatbot, progress) need a bigger footprint —
-    // their React component renders a real form, not a pill. We pick
-    // the node `type` so the canvas registers the right React component
-    // and override width/height so React Flow doesn't squash the layout.
-    const isRich = spec.kind === "chatbot" || spec.kind === "progress";
+    // Rich-UI node kinds need a bigger footprint — their React component
+    // renders a real form/card, not a pill. We pick the `type` so the canvas
+    // registers the right React component and override width/height so React
+    // Flow doesn't squash the layout.
+    const isMap = spec.kind === "map";
+    const isRich = isMap || spec.kind === "chatbot" || spec.kind === "progress";
     return {
       id: spec.id,
       // `type` matches the key in `nodeTypes` in Canvas.tsx
@@ -94,7 +98,9 @@ export function layoutFromSpec(
       draggable: true,
       deletable: false,
       // Bigger box for the rich-UI nodes. Pill nodes use the default.
-      style: isRich
+      style: isMap
+        ? { width: MAP_NODE_WIDTH, height: MAP_NODE_HEIGHT }
+        : isRich
         ? { width: RICH_NODE_WIDTH, height: RICH_NODE_HEIGHT }
         : undefined,
     };
