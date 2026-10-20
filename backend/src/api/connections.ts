@@ -97,6 +97,11 @@ connectionsApi.patch(
     const existing = getConnectionSummary(id);
     if (!existing) return c.json({ error: "connection not found" }, 404);
     const body = c.req.valid("json") as Parameters<typeof updateConnection>[1];
+    // Repointing a connection must not carry its stored key to a new host:
+    // the background health check would send Authorization to that URL.
+    if (body.baseUrl && body.baseUrl.trim().replace(/\/+$/, "") !== existing.baseUrl && body.apiKey === undefined && existing.hasApiKey) {
+      return c.json({ error: "changing baseUrl requires re-entering the API key" }, 400);
+    }
     const updated = updateConnection(id, body);
     if (!updated) return c.json({ error: "connection not found" }, 404);
     // Auto-verify: the key/URL may have changed — re-test in the background

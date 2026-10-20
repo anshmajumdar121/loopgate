@@ -29,6 +29,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   process.env.PATH = origPath;
+  delete process.env.LOOP_USE_LLM_BRIDGE;
   if (origAllowMock === undefined) delete process.env.LOOP_ALLOW_MOCK;
   else process.env.LOOP_ALLOW_MOCK = origAllowMock;
   vi.restoreAllMocks();
@@ -47,7 +48,7 @@ async function loadFresh() {
 
 function mockWarnings(warn: ReturnType<typeof vi.spyOn>): unknown[][] {
   return warn.mock.calls.filter((c: unknown[]) =>
-    String(c[0]).includes("MOCK agents")
+    String(c[0]).includes("CLI not found or not runnable")
   );
 }
 
@@ -60,8 +61,9 @@ describe("OPENCODE_AVAILABLE probe", () => {
     expect(mockWarnings(warn)).toHaveLength(0);
   }, 20_000);
 
-  it("reports unavailable and warns loudly once when opencode is missing", async () => {
+  it("warns loudly once when opencode is missing and the LLM bridge is disabled", async () => {
     process.env.PATH = emptyDir;
+    process.env.LOOP_USE_LLM_BRIDGE = "0";
     delete process.env.LOOP_ALLOW_MOCK;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadFresh();
@@ -69,8 +71,17 @@ describe("OPENCODE_AVAILABLE probe", () => {
     expect(mockWarnings(warn)).toHaveLength(1);
   }, 20_000);
 
+  it("stays quiet when the LLM bridge is on (default) — opencode is not needed", async () => {
+    process.env.PATH = emptyDir;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadFresh();
+    expect(mod.isOpencodeAvailable()).toBe(false);
+    expect(mockWarnings(warn)).toHaveLength(0);
+  }, 20_000);
+
   it("stays quiet about mock mode when LOOP_ALLOW_MOCK=1", async () => {
     process.env.PATH = emptyDir;
+    process.env.LOOP_USE_LLM_BRIDGE = "0";
     process.env.LOOP_ALLOW_MOCK = "1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadFresh();

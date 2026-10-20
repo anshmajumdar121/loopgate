@@ -169,16 +169,22 @@ describe("connection-health: re-check on create/update via API", () => {
     const before = getConnection(conn.id)!.health!.checkedAt;
 
     failingHosts.add("new.example");
-    const res = await app().request(`/api/connections/${conn.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "editable",
-        providerType: "openai-compatible",
-        baseUrl: "https://new.example/v1",
-        model: "vendor/test-model",
-      }),
-    });
+    const patch = (extra: Record<string, unknown>) =>
+      app().request(`/api/connections/${conn.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "editable",
+          providerType: "openai-compatible",
+          baseUrl: "https://new.example/v1",
+          model: "vendor/test-model",
+          ...extra,
+        }),
+      });
+    // Repointing without re-entering the key is refused: the stored key
+    // must never be sent to a host the user didn't give it to.
+    expect((await patch({})).status).toBe(400);
+    const res = await patch({ apiKey: "sk-new" });
     expect(res.status).toBe(200);
     await waitFor(() => getConnection(conn.id)?.health?.ok === false);
     expect(getConnection(conn.id)!.health!.checkedAt >= before).toBe(true);

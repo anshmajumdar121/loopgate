@@ -232,8 +232,8 @@ function spawnBridgeRunner(
     upstreamModel,
     "--base-url",
     baseUrl,
-    "--api-key",
-    useLocalCli ? "" : apiKey,
+    // API key travels via env (LOOP_LLM_API_KEY below), never argv: argv is
+    // visible to every local process (ps / Task Manager / WMI).
     "--workdir",
     workdir,
     "--role",
@@ -264,6 +264,7 @@ function spawnBridgeRunner(
     LOOP_MODEL_ID: options?.model ?? upstreamModel,
     LOOP_CONNECTION_ID: connection?.id ?? "",
     LOOP_CONNECTION_NAME: connection?.name ?? "",
+    LOOP_LLM_API_KEY: useLocalCli ? "" : apiKey,
   };
 
   let child: ChildProcess;
