@@ -5,7 +5,9 @@
 #   docker build -t loopgate-demo .
 #   docker run --rm -p 10000:10000 loopgate-demo     → http://localhost:10000
 
-FROM node:22-bookworm-slim AS build
+# Node 24 / npm 11: the lock files were generated with npm 11; npm 10 (Node 22)
+# rejects them in `npm ci` over an optional nested dependency.
+FROM node:24-bookworm-slim AS build
 # The runtime check (headless Chromium) is disabled in demo mode.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
@@ -18,7 +20,7 @@ COPY backend backend
 RUN cd ui && npx vite build
 RUN cd backend && npx tsc -p tsconfig.json && npm prune --omit=dev --no-audit --no-fund
 
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 ENV NODE_ENV=production \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     LOOP_PUBLIC_DEMO=1 \
