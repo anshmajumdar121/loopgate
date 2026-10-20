@@ -1,4 +1,4 @@
-# Loop Agent — a loop orchestrator you can actually trust with repetitive work
+# Loopgate — a loop orchestrator you can actually trust with repetitive work
 
 > Delegate 'the same step, N times' to AI - every item is planned, made and independently verified, with guarantees enforced in code, not prompts.
 
@@ -22,7 +22,7 @@ API, the local `claude` CLI (your Claude Code login, no API key needed) or the M
 ---
 
 **Delegate the job that is "the same step, N times."** Describe it once as a
-template, hand Loop Agent the list, and it runs every item through its own
+template, hand Loopgate the list, and it runs every item through its own
 **plan → make → independent verify** loop. Rejections feed back into the next
 attempt automatically. Items that can't converge are escalated, and the rest
 keep going. A crash in the middle resumes where it left off.

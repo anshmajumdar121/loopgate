@@ -7,7 +7,7 @@ README already makes. Replace `<REPO_URL>` with the GitHub link before posting.
 
 1. **Problem:** AI agents say "done" when they aren't, and prompts like "don't touch `.env`" are
    only hopes.
-2. **Proof:** Loop Agent enforces its guarantees in code, and an attack scoreboard
+2. **Proof:** Loopgate enforces its guarantees in code, and an attack scoreboard
    (`npm run demo:trust`) shows 11/11 holding.
 3. **Try it:** run the whole thing offline in 60 seconds, no API key.
 
@@ -30,7 +30,7 @@ typescript  react-flow  hono  ai-safety  workflow-automation  batch-processing
 
 Upload under Settings, Social preview. Keep important text inside a 40 px margin.
 
-- **Title:** Loop Agent
+- **Title:** Loopgate
 - **Subtitle:** Delegate "the same step, N times" to AI. Verified in code, not prompts.
 - **Proof strip (small, bottom):** `11/11 guarantees hold` · runs offline in 60 seconds · MIT
 - **Visual:** the plan, make, verify diagram from the README, or a screenshot of the Batch
@@ -43,7 +43,7 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 **1/5**
 > AI agents love saying "done." They're often not.
 >
-> I built Loop Agent so that "done" has to be earned: every item in a batch is planned, made, and verified by a separate verifier before it counts.
+> I built Loopgate so that "done" has to be earned: every item in a batch is planned, made, and verified by a separate verifier before it counts.
 >
 > <REPO_URL>
 
@@ -52,7 +52,7 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 >
 > "Don't touch .env." "The verifier decides." Then you hope.
 >
-> Loop Agent enforces them in code instead.
+> Loopgate enforces them in code instead.
 
 **3/5**
 > Proof, not promises. `npm run demo:trust` is an attack scoreboard:
@@ -78,7 +78,7 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 
 > Agents that say "done" when the work isn't done are the most expensive kind of bug, because you find out late.
 >
-> I just shipped Loop Agent, a loop orchestrator for repetitive work: "the same step, N times." You write the template once and hand it a list. Every item goes through its own plan, make, and independent verify loop. Rejections feed back into the next attempt, items that can't converge are escalated, and a crash resumes where it left off.
+> I just shipped Loopgate, a loop orchestrator for repetitive work: "the same step, N times." You write the template once and hand it a list. Every item goes through its own plan, make, and independent verify loop. Rejections feed back into the next attempt, items that can't converge are escalated, and a crash resumes where it left off.
 >
 > The part I care about most: the guarantees are enforced in code, not in prompts. The maker can't approve its own work. "REJECT - cannot approve" is never treated as an approval. Writes outside the plan, like .env or package.json, are blocked.
 >
@@ -94,13 +94,13 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 
 **Title** (under 80 characters):
 
-> Show HN: Loop Agent – batch AI jobs where a separate verifier gates each item
+> Show HN: Loopgate – batch AI jobs where a separate verifier gates each item
 
 **First comment:**
 
 > Hi HN. I built this because agent loops kept telling me "done" when they weren't, and because most of the safety lives in the prompt ("don't touch .env"), which is a hope rather than a guarantee.
 >
-> Loop Agent is for the job that is "the same step, N times". You give it a template and a list; each item runs its own plan, make, independent verify loop. Rejections feed the next attempt, items that can't converge are escalated, and a crash resumes from per-item checkpoints.
+> Loopgate is for the job that is "the same step, N times". You give it a template and a list; each item runs its own plan, make, independent verify loop. Rejections feed the next attempt, items that can't converge are escalated, and a crash resumes from per-item checkpoints.
 >
 > The guarantees are enforced in code: a strict verdict parser (only the leading keyword counts, unknown means REJECT), an approval gate that rejects an APPROVE contradicting its own checklist, a write policy in the bridge (reserved files, denylist, plan allowlist), and a Host/Origin allowlist on a 127.0.0.1 bind. `npm run demo:trust` boots an isolated backend against a deterministic fake LLM and runs the attacks. It prints 11/11.
 >
@@ -116,7 +116,7 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 
 > Anyone who has run Claude on a list of repetitive tasks knows the failure mode: it says it finished, and it didn't.
 >
-> Loop Agent runs each item through plan, make, and an independent verify step. If the verifier rejects, the required fixes go into the next attempt. Items that never converge get escalated while the rest keep going.
+> Loopgate runs each item through plan, make, and an independent verify step. If the verifier rejects, the required fixes go into the next attempt. Items that never converge get escalated while the rest keep going.
 >
 > You can point a connection at the local `claude` CLI (your Claude Code login, no API key), or at an OpenAI/Anthropic-compatible API.
 >
@@ -132,7 +132,7 @@ Upload under Settings, Social preview. Keep important text inside a 40 px margin
 
 **Title:** Open-source batch orchestrator with an independent verifier per item, guarantees enforced in code, runs fully offline in the demo
 
-> I built Loop Agent for "same step, N times" jobs: each item gets a plan, make, and independent verify loop, with rejections fed back automatically and a resume-after-crash checkpoint per item.
+> I built Loopgate for "same step, N times" jobs: each item gets a plan, make, and independent verify loop, with rejections fed back automatically and a resume-after-crash checkpoint per item.
 >
 > Connections accept any OpenAI-compatible endpoint, so a local server that speaks that API is the intended fit. I have only run the offline demo against a deterministic fake LLM so far, so I don't have local-model results to share and I would like reports from people who try it.
 >

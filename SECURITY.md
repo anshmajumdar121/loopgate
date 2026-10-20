@@ -1,6 +1,6 @@
 # Security Policy
 
-Loop Agent is a local developer tool. It is not hardened for exposure to a network.
+Loopgate is a local developer tool. It is not hardened for exposure to a network.
 
 ## What it does to protect you
 

@@ -1,4 +1,4 @@
-# Contributing to Loop Agent
+# Contributing to Loopgate
 
 Thanks for helping out. Small, focused changes are the easiest to review.
 
