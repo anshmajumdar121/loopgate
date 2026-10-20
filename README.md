@@ -1,5 +1,26 @@
 # Loop Agent — a loop orchestrator you can actually trust with repetitive work
 
+> Delegate 'the same step, N times' to AI - every item is planned, made and independently verified, with guarantees enforced in code, not prompts.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)](#quick-start)
+[![trust scoreboard 11/11](https://img.shields.io/badge/trust%20scoreboard-11%2F11-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts)
+
+## Try it in 60 seconds (no API key, no network)
+
+```bash
+cd backend && npm install && npm run demo:stack    # fake LLM + isolated backend + UI
+# then open http://localhost:5174
+npm run demo:trust                                 # the attack scoreboard
+```
+
+`npm install` needs the network once; the demo itself makes no network or paid API calls.
+
+**Use your existing subscription.** A connection can be an OpenAI- or Anthropic-compatible
+API, the local `claude` CLI (your Claude Code login, no API key needed) or the Mavis CLI.
+
+---
+
 **Delegate the job that is "the same step, N times."** Describe it once as a
 template, hand Loop Agent the list, and it runs every item through its own
 **plan → make → independent verify** loop. Rejections feed back into the next
@@ -124,3 +145,10 @@ cd ui && npm test          # 40 tests
   an explicit graph/run model (XState-style states with budgets and human gates) and parallel
   workers.
 - The project's full audit and roadmap live in `docs/superpowers/`.
+
+## Project docs
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): setup, tests and PR expectations
+- [SECURITY.md](SECURITY.md): threat model, known gaps and private reporting
+- [docs/LAUNCH.md](docs/LAUNCH.md): launch and outreach plan
+- [LICENSE](LICENSE): MIT
