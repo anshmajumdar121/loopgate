@@ -8,12 +8,48 @@ import type { WsClientMessage, WsServerMessage } from "../types.js";
  */
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
+/** Hard cap on concurrent sockets (backstop for verifyClient in index.ts). */
+export const MAX_WS_SUBSCRIBERS = 200;
+/** Task ids are short nanoid-style strings; refuse absurd ones. */
+const MAX_TASK_ID_LENGTH = 256;
+
+/**
+ * Parse + shape-check an inbound client frame. Returns null for anything
+ * that isn't a well-formed WsClientMessage (bad JSON, `null`, arrays,
+ * unknown types, non-string taskId, ...).
+ */
+export function parseClientMessage(raw: string): WsClientMessage | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const taskIdOk =
+    typeof o.taskId === "string" && o.taskId.length > 0 && o.taskId.length <= MAX_TASK_ID_LENGTH;
+  switch (o.type) {
+    case "ping":
+      return { type: "ping" };
+    case "subscribe":
+      return taskIdOk ? { type: "subscribe", taskId: o.taskId as string } : null;
+    case "unsubscribe":
+      // taskId is informational for unsubscribe; don't require it.
+      return { type: "unsubscribe", taskId: typeof o.taskId === "string" ? o.taskId : "" };
+    default:
+      return null;
+  }
+}
+
 interface Subscriber {
   ws: WebSocket;
   taskId: string | null; // null = broadcast-all mode (not used today)
 }
 
-class Broadcaster {
+export class Broadcaster {
+  constructor(private readonly maxSubscribers: number = MAX_WS_SUBSCRIBERS) {}
+
   private subscribers = new Map<WebSocket, Subscriber>();
   /** Per-socket heartbeat timer. WeakMap so the timer doesn't pin the
    *  WebSocket in memory after disconnect. */
@@ -26,10 +62,25 @@ class Broadcaster {
   }
 
   private handleConnection(ws: WebSocket): void {
+    if (this.subscribers.size >= this.maxSubscribers) {
+      // 1013 = Try Again Later
+      try {
+        ws.close(1013, "too many clients");
+      } catch {
+        ws.terminate();
+      }
+      return;
+    }
     const sub: Subscriber = { ws, taskId: null };
     this.subscribers.set(ws, sub);
 
-    ws.on("message", (raw) => this.handleClientMessage(ws, raw.toString()));
+    ws.on("message", (raw) => {
+      try {
+        this.handleClientMessage(ws, raw.toString());
+      } catch (err) {
+        console.error("[loop-agent-backend] ws message handler error:", err);
+      }
+    });
     ws.on("close", () => {
       const timer = this.heartbeatTimers.get(ws);
       if (timer) {
@@ -68,12 +119,8 @@ class Broadcaster {
   }
 
   private handleClientMessage(ws: WebSocket, raw: string): void {
-    let msg: WsClientMessage;
-    try {
-      msg = JSON.parse(raw) as WsClientMessage;
-    } catch {
-      return;
-    }
+    const msg = parseClientMessage(raw);
+    if (!msg) return;
 
     const sub = this.subscribers.get(ws);
     if (!sub) return;

@@ -14,6 +14,7 @@ import { runLoop, stopLoop, isLoopRunning, resumeLoop, resetTask, rePrompt } fro
 import { isActiveStatus } from "../store/persistence.js";
 import { broadcaster } from "../ws/broadcaster.js";
 import { resolveConnectionModel } from "../store/connections.js";
+import { anyBatchRunning } from "../loop/batch-runner.js";
 import type { CreateTaskBody, ConfirmPlanBody, FeedbackBody } from "../types.js";
 
 const createSchema = z.object({
@@ -67,7 +68,7 @@ tasksApi.get("/tasks", (c) => {
  * Returns a human-readable problem string, or null when every role can
  * authenticate.
  */
-function connectionProblemForTask(body: CreateTaskBody): string | null {
+export function connectionProblemForTask(body: Pick<CreateTaskBody, "model" | "modelOverrides"> & Partial<CreateTaskBody>): string | null {
   const roles = [
     ["planner", "planning"],
     ["maker", "implementation"],
@@ -127,6 +128,9 @@ tasksApi.post("/tasks", zValidator("json", createSchema), async (c) => {
   // one with a 409 + a pointer to the active task. Plan recommends this to
   // keep the orchestrator state machine simple and prevent two loops from
   // racing on the same workdir / GOAL.md / STATE.md files.
+  if (anyBatchRunning()) {
+    return c.json({ error: "a batch is running — wait for it or cancel it first" }, 409);
+  }
   const active = getActiveTask();
   if (active) {
     return c.json(

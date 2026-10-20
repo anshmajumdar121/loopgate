@@ -39,6 +39,78 @@ async function writeFileAtomic(path, data) {
   await rename(tmp, path);
 }
 
+// ── Maker write policy ────────────────────────────────────────────────
+// Orchestrator-owned files: the plan, the run state, the binding rules and
+// everything that configures or records other agents. A maker that can
+// write these can rewrite its own acceptance criteria or forge a verdict.
+const RESERVED_FILES = new Set(["goal.md", "state.md", "loop-constraints.md"]);
+const RESERVED_DIRS = [".opencode/", ".loop/", ".git/", "node_modules/"];
+
+function globToRegExp(glob) {
+  const esc = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    "^" + esc.replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*") + "$",
+    "i"
+  );
+}
+
+/** Paths listed under GOAL.md → "Files to touch" (empty if none/unreadable). */
+async function readPlanAllowlist(goalPath) {
+  let text;
+  try {
+    text = await readFile(goalPath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^#{1,6}\s*Files to touch\b/i.test(l.trim()));
+  if (start < 0) return [];
+  const out = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,6}\s/.test(line.trim())) break;
+    const m = line.match(/^\s*[-*]\s+(.+)$/);
+    if (!m) continue;
+    const tick = m[1].match(/`([^`]+)`/);
+    let p = (tick ? tick[1] : m[1].split(/\s+/)[0]).trim();
+    p = p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/[,;:]$/, "");
+    if (!p || /^(none|n\/a|-)$/i.test(p)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/** Returns a reason string if writing `relPath` is not allowed, else null. */
+function checkWritePolicy(relPath, allowlist) {
+  const norm = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const lower = norm.toLowerCase();
+  const segs = lower.split("/");
+  const base = segs[segs.length - 1];
+  if (RESERVED_FILES.has(lower) || RESERVED_DIRS.some((d) => lower.startsWith(d))) {
+    return "reserved orchestrator file";
+  }
+  if (
+    base === ".env" ||
+    base.startsWith(".env.") ||
+    segs.some((s) => s === "secrets" || s === "credentials" || s === "migrations") ||
+    ["auth", "payments", "billing"].includes(segs[0]) ||
+    base.includes("_key") ||
+    base.includes("_secret")
+  ) {
+    return "binding denylist (loop-constraints.md)";
+  }
+  if (process.env.LOOP_ENFORCE_ALLOWLIST !== "0" && allowlist.length > 0) {
+    const ok = allowlist.some((entry) => {
+      const e = entry.toLowerCase();
+      if (e === lower) return true;
+      if (e.endsWith("/")) return lower.startsWith(e);
+      if (e.includes("*")) return globToRegExp(e).test(lower);
+      return false;
+    });
+    if (!ok) return "not in GOAL.md → Files to touch";
+  }
+  return null;
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -486,10 +558,24 @@ try {
       files.push({ path: "index.html", content: m ? m[1] : text });
     }
     const written = [];
+    const blocked = [];
+    // Write policy, enforced HERE (not by prompt): orchestrator-owned files
+    // are never writable, the binding denylist from loop-constraints.md is
+    // always applied, and when the plan lists "Files to touch" only those
+    // paths may be written. Disable allowlist enforcement (not the reserved
+    // or denylist checks) with LOOP_ENFORCE_ALLOWLIST=0.
+    const allowlist = await readPlanAllowlist(rp(workroot, "GOAL.md"));
     for (const f of files) {
       const abs = rp(workroot, f.path);
       if (!abs.startsWith(workroot + sep) || f.path.startsWith("/") || f.path.includes("..")) {
         process.stderr.write(`[maker] SKIPPED unsafe path: ${f.path}\n`);
+        blocked.push({ path: f.path, reason: "unsafe path" });
+        continue;
+      }
+      const verdictOnPath = checkWritePolicy(f.path, allowlist);
+      if (verdictOnPath) {
+        process.stderr.write(`[maker] BLOCKED ${f.path}: ${verdictOnPath}\n`);
+        blocked.push({ path: f.path, reason: verdictOnPath });
         continue;
       }
       await mkdir(dirname(abs), { recursive: true });
@@ -512,15 +598,20 @@ try {
       `**Files changed** (${written.length}):`,
       ...written.map((p) => `- ${p} — implemented per plan`),
       "",
-      "**Build:** n/a — static files, no build step",
-      "**Tests:** automated runtime check runs after this phase",
+      "**Build:** not run by the maker (bridge runner has no tools) — orchestrator checks run next",
+      "**Tests:** not run by the maker — orchestrator checks run next",
       "**Lint:** n/a",
       "",
       `**New files**: ${written.join(", ")}`,
+      ...(blocked.length > 0
+        ? ["", `**Blocked writes** (${blocked.length}): ${blocked.map((b) => `${b.path} (${b.reason})`).join("; ")}`]
+        : []),
       "",
       "**Notes for verifier:**",
-      "- Static HTML/CSS/JS prototype; entry point index.html",
-      "- Implements the acceptance criteria listed in GOAL.md",
+      "- This summary is generated by the bridge, not a claim by the maker: verify every criterion against the file contents yourself",
+      ...(blocked.length > 0
+        ? ["- The maker attempted writes outside the allowed set (listed above); judge scope accordingly"]
+        : []),
     ].join("\n");
     await appendFile(statePath, summary, "utf8");
     process.stderr.write(`[maker] appended diff summary to ${statePath}\n`);

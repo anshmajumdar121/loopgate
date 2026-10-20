@@ -14,8 +14,15 @@
 //                                  404 if path doesn't exist
 
 import { Hono } from "hono";
-import { homedir } from "node:os";
-import { resolve as pathResolve, dirname, basename } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import {
+  resolve as pathResolve,
+  relative as pathRelative,
+  isAbsolute,
+  dirname,
+  sep,
+} from "node:path";
+import { realpathSync } from "node:fs";
 import {
   readdir,
   stat,
@@ -43,19 +50,48 @@ function safeRoots(): string[] {
   const home = homedir();
   return [
     home,
-    "/tmp",
+    // POSIX keeps the literal /tmp; on Windows "/tmp" would resolve to
+    // <drive>:\tmp, which isn't the temp dir — use the OS temp dir instead.
+    process.platform === "win32" ? tmpdir() : "/tmp",
     // Also allow the Loop Agent workspace root so the picker can drop
     // users into their saved task workspaces.
     pathResolve(process.cwd(), "data", "workspaces"),
   ];
 }
 
+/** Resolve symlinks where the path exists; fall back to the lexical
+ *  resolution for paths that don't (yet) exist. */
+function realOrResolved(p: string): string {
+  const resolved = pathResolve(p);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Separator-agnostic containment: true iff `child` is `root` or inside
+ *  it. path.relative handles `\` vs `/` and (on win32) drive-letter case. */
+function isWithin(root: string, child: string): boolean {
+  const rel = pathRelative(root, child);
+  if (rel === "") return true;
+  if (isAbsolute(rel)) return false; // different drive on win32
+  return rel !== ".." && !rel.startsWith(".." + sep) && !rel.startsWith("../");
+}
+
 function isPathSafe(p: string): boolean {
   const resolved = pathResolve(p);
-  return safeRoots().some(
-    (root) =>
-      resolved === root || resolved.startsWith(root + "/")
-  );
+  const real = realOrResolved(resolved);
+  return safeRoots().some((root) => {
+    const rootResolved = pathResolve(root);
+    const rootReal = realOrResolved(rootResolved);
+    // Lexical check stops `..` tricks; the realpath check stops a
+    // symlink inside an allowed root from escaping it.
+    return (
+      (isWithin(rootResolved, resolved) || isWithin(rootReal, resolved)) &&
+      isWithin(rootReal, real)
+    );
+  });
 }
 
 fsApi.get("/fs/home", (c) => {
@@ -140,4 +176,4 @@ fsApi.get("/fs/list", async (c) => {
 });
 
 /** Exposed for the tests / debugging. */
-export { safeRoots, isPathSafe };
+export { safeRoots, isPathSafe, isWithin };

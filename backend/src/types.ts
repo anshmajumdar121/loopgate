@@ -297,6 +297,12 @@ export interface Task {
    *  user gate and proceeds straight to implementation. Useful for mock
    *  runs and automation. */
   autoApprovePlan?: boolean;
+  /** If true, a verifier REJECT feeds its required fixes straight into the
+   *  next attempt instead of waiting for user feedback (batch items). The
+   *  max-attempts cap still escalates. */
+  autoIterate?: boolean;
+  /** Batch this task belongs to (Map node item), if any. */
+  batchId?: string;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
@@ -356,6 +362,7 @@ export type WsClientMessage =
 
 export type WsServerMessage =
   | { type: "pong" }
+  | { type: "batch_update"; batchId: string; batch: import("./store/batches.js").Batch }
   | { type: "task_update"; taskId: string; task: Task }
   | { type: "log"; taskId: string; entry: LogEntry }
   | { type: "phase_change"; taskId: string; from: TaskStatus; to: TaskStatus }

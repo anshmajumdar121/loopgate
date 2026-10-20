@@ -432,7 +432,7 @@ function parseDiffSection(rawLines: string[], attempt: number): DiffSummary {
 function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
   const lines = normaliseFieldLines(rawLines);
   const verdictRaw = readField(lines, "Verdict") ?? "";
-  const outcome = normaliseOutcome(verdictRaw);
+  let outcome = normaliseOutcome(verdictRaw);
 
   const buildLine = readField(lines, "Build") ?? "";
   const testsLine = readField(lines, "Tests") ?? "";
@@ -457,12 +457,31 @@ function parseVerdictSection(rawLines: string[], attempt: number): Verdict {
     ? ratioToScore(criteriaPassed, criteriaWalk.length)
     : undefined;
 
+  // Approval gate: an APPROVE that contradicts the verifier's own checklist
+  // is not an approval. Only explicit failures count (a missing line is not
+  // a FAIL), so terse-but-honest verdicts still pass.
+  const buildExit = firstIntOrNull(buildLine);
+  const failedCount = Number.isFinite(testsFailed) ? testsFailed : 0;
+  const gateFailures: string[] = [];
+  if (/^FAIL/i.test(scopeLine.trim())) gateFailures.push("Scope: FAIL");
+  if (/^FAIL/i.test(intentLine.trim())) gateFailures.push("Intent: FAIL");
+  if (/^FAIL/i.test(noCheatingLine.trim())) gateFailures.push("No cheating: FAIL");
+  if (/^HIGH/i.test(riskLine.trim())) gateFailures.push("Risk: HIGH");
+  if (buildExit !== null && buildExit !== 0) gateFailures.push(`Build exit ${buildExit}`);
+  if (failedCount > 0) gateFailures.push(`${failedCount} test(s) failed`);
+  const failedCriteria = criteriaWalk.filter((c) => !c.passed);
+  if (failedCriteria.length > 0) gateFailures.push(`${failedCriteria.length} criteria unchecked`);
+  if (outcome === "APPROVE" && gateFailures.length > 0) {
+    outcome = "REJECT";
+    requiredFixes.unshift(`Approval gate blocked APPROVE: ${gateFailures.join(", ")}`);
+  }
+
   return {
     attempt,
     outcome,
-    buildExit: firstIntOrNull(buildLine),
+    buildExit,
     testsPassed: Number.isFinite(testsPassed) ? testsPassed : 0,
-    testsFailed: Number.isFinite(testsFailed) ? testsFailed : 0,
+    testsFailed: failedCount,
     scopePass: scopeLine.toUpperCase().startsWith("PASS"),
     intentPass: intentLine.toUpperCase().startsWith("PASS"),
     noCheatingPass: noCheatingLine.toUpperCase().startsWith("PASS"),
@@ -574,10 +593,27 @@ function stripNodeTag(text: string): { text: string; nodeId?: string } {
  * "escalate to human, do not approve" never reads as APPROVE.
  */
 function matchOutcome(raw: string): VerdictOutcome | null {
-  const upper = raw.toUpperCase();
-  if (/\bESCALATE(?:[_\s-]?HUMAN)?\b/.test(upper)) return "ESCALATE_HUMAN";
-  if (/\bAPPROVED?\b/.test(upper)) return "APPROVE";
-  if (/\bREJECT(?:ED)?\b/.test(upper)) return "REJECT";
+  // Strict: only the LEADING keyword decides. A previous version scanned the
+  // whole line and checked APPROVE first, so "REJECT — cannot approve" and
+  // "NOT APPROVED" both parsed as APPROVE. Approval must never be inferred
+  // from prose; anything that doesn't lead with a keyword fails closed.
+  const upper = raw.toUpperCase().replace(/[*_`~>#]/g, " ").trim();
+  // The verifier echoing the template ("APPROVE | REJECT | ESCALATE_HUMAN")
+  // is not a decision.
+  if (/APPROVE\s*\|\s*REJECT/.test(upper)) return null;
+  const lead = upper.match(/^[^A-Z]*([A-Z_]+)/)?.[1] ?? "";
+  if (/^ESCALATE/.test(lead)) return "ESCALATE_HUMAN";
+  if (/^REJECT(?:ED)?$/.test(lead)) return "REJECT";
+  if (/^APPROVED?$/.test(lead)) {
+    // "APPROVE ... but REJECT/escalate" is contradictory → not an approval.
+    const rest = upper.slice(upper.indexOf(lead) + lead.length);
+    if (/\bREJECT|\bESCALATE/.test(rest)) return "REJECT";
+    return "APPROVE";
+  }
+  // No leading keyword: an escalation mention still escalates (safe side);
+  // everything else is REJECT-ish or unknown, never APPROVE.
+  if (/\bESCALATE/.test(upper)) return "ESCALATE_HUMAN";
+  if (/\bREJECT|\bAPPROVE/.test(upper)) return "REJECT";
   return null;
 }
 

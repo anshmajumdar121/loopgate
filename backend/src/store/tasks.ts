@@ -58,6 +58,8 @@ export function createTask(input: {
   sessionId?: string;
   contextFiles?: string[];
   autoApprovePlan?: boolean;
+  autoIterate?: boolean;
+  batchId?: string;
 }): Task {
   const id = nanoid(12);
   const now = new Date().toISOString();
@@ -103,6 +105,8 @@ export function createTask(input: {
     sessionId,
     contextFiles: input.contextFiles,
     autoApprovePlan: input.autoApprovePlan,
+    autoIterate: input.autoIterate,
+    batchId: input.batchId,
     createdAt: now,
     updatedAt: now,
     history: [],

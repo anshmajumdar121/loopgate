@@ -7,10 +7,15 @@
 // npm dependency resolution happens (fast + hermetic).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBuildStep, resetBuildRunnerCache } from "../build-runner.js";
+import {
+  runBuildStep,
+  resetBuildRunnerCache,
+  scrubbedEnv,
+  __setStageTimeoutsForTests,
+} from "../build-runner.js";
 
 let workdir: string;
 
@@ -117,5 +122,97 @@ describe("runBuildStep", () => {
     const result = await runBuildStep(workdir);
     expect(result!.buildExit).toBe(0);
     expect(result!.outputDir).toBe(join(workdir, "dist"));
+  });
+
+  // Regression: spawn("npm") without a shell is ENOENT on Windows (npm is
+  // a .cmd shim), so every project-shaped task reported exit 127.
+  it("does not fail to spawn npm (exit 127) on any platform", async () => {
+    await primeProject({ build: "node -e \"process.exit(0)\"" });
+    const result = await runBuildStep(workdir);
+    expect(result!.outputTail ?? "").not.toContain("failed to spawn npm");
+    expect(result!.buildExit).toBe(0);
+  });
+
+  it("kills the whole process tree when a stage times out", async () => {
+    // build → npm → (cmd|sh) → node spawner.cjs → node grandchild. Without
+    // a tree kill the grandchild survives and holds the pipes open.
+    await writeFile(
+      join(workdir, "spawner.cjs"),
+      [
+        "const { spawn } = require('child_process');",
+        "const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' });",
+        "require('fs').writeFileSync('grandchild.pid', String(c.pid));",
+        "setTimeout(() => {}, 60000);",
+      ].join("\n"),
+      "utf8"
+    );
+    await primeProject({ build: "node spawner.cjs" });
+    __setStageTimeoutsForTests({ scriptMs: 6000 });
+    try {
+      const started = Date.now();
+      const result = await runBuildStep(workdir);
+      expect(Date.now() - started).toBeLessThan(25_000);
+      expect(result!.failedStage).toBe("build");
+      expect(result!.outputTail).toContain("timed out");
+      const pid = Number(await readFile(join(workdir, "grandchild.pid"), "utf8"));
+      expect(pid).toBeGreaterThan(0);
+      // Give the OS a moment to reap, then the grandchild must be gone.
+      let alive = true;
+      for (let i = 0; i < 20 && alive; i++) {
+        try {
+          process.kill(pid, 0);
+          await new Promise((r) => setTimeout(r, 250));
+        } catch {
+          alive = false;
+        }
+      }
+      if (alive) process.kill(pid, "SIGKILL"); // don't leak it on failure
+      expect(alive).toBe(false);
+    } finally {
+      __setStageTimeoutsForTests(null);
+    }
+  }, 40_000);
+});
+
+describe("scrubbedEnv", () => {
+  const source: NodeJS.ProcessEnv = {
+    Path: "C:/Windows/system32",
+    SystemRoot: "C:/Windows",
+    ComSpec: "C:/Windows/system32/cmd.exe",
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    APPDATA: "C:/Users/u/AppData/Roaming",
+    LOCALAPPDATA: "C:/Users/u/AppData/Local",
+    USERPROFILE: "C:/Users/u",
+    TEMP: "C:/Temp",
+    TMP: "C:/Temp",
+    OPENAI_API_KEY: "sk-secret",
+    LOOP_CONNECTION_TOKEN: "tok",
+  };
+
+  it("keeps Windows essentials (case-insensitive) and drops secrets on win32", () => {
+    const env = scrubbedEnv(source, "win32");
+    for (const k of [
+      "Path",
+      "SystemRoot",
+      "ComSpec",
+      "PATHEXT",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "USERPROFILE",
+      "TEMP",
+      "TMP",
+    ]) {
+      expect(env[k]).toBe(source[k]);
+    }
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.LOOP_CONNECTION_TOKEN).toBeUndefined();
+  });
+
+  it("does not add Windows vars on POSIX", () => {
+    const env = scrubbedEnv({ ...source, PATH: "/usr/bin" }, "linux");
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.SystemRoot).toBeUndefined();
+    expect(env.APPDATA).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
   });
 });

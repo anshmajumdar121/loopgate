@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   writeTrace,
   readTracesForTask,
@@ -42,8 +42,15 @@ function sampleRecord(overrides: Partial<TraceRecord> = {}): TraceRecord {
 
 describe("traceFilePath", () => {
   it("lays files under <workdir>/.loop/traces/<taskId>/<attempt>-<role>.json", () => {
-    const p = traceFilePath("/tmp/work", "task_abc", 3, "verifier");
-    expect(p).toBe(join("/tmp/work", ".loop", "traces", "task_abc", "3-verifier.json"));
+    const base = join(tmpdir(), "work");
+    const p = traceFilePath(base, "task_abc", 3, "verifier");
+    // traceFilePath resolve()s the workdir, so compare against a resolved
+    // base — a literal POSIX "/tmp/work" becomes "<drive>:\tmp\work" on win32.
+    expect(p).toBe(join(resolve(base), ".loop", "traces", "task_abc", "3-verifier.json"));
+    // Relative workdirs are anchored to cwd the same way.
+    expect(traceFilePath("rel-work", "t", 1, "maker")).toBe(
+      join(resolve("rel-work"), ".loop", "traces", "t", "1-maker.json")
+    );
   });
 });
 

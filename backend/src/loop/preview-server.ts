@@ -7,10 +7,35 @@
 // need, and the backend already avoids framework servers outside Hono.
 
 import { createServer, type Server } from "node:http";
-import { createReadStream, existsSync, statSync } from "node:fs";
-import { resolve as pathResolve, normalize, extname } from "node:path";
+import { createReadStream, existsSync, realpathSync, statSync } from "node:fs";
+import {
+  resolve as pathResolve,
+  relative as pathRelative,
+  isAbsolute,
+  normalize,
+  extname,
+  sep,
+} from "node:path";
 
 const PREVIEW_PORT = Number(process.env.LOOP_PREVIEW_PORT || 3210);
+/** Loopback only — previews are for the local user, never the LAN. */
+const PREVIEW_HOST = "127.0.0.1";
+
+/** Separator-agnostic containment (works with win32 backslashes). */
+function isWithin(root: string, child: string): boolean {
+  const rel = pathRelative(root, child);
+  if (rel === "") return true;
+  if (isAbsolute(rel)) return false; // different drive on win32
+  return rel !== ".." && !rel.startsWith(".." + sep) && !rel.startsWith("../");
+}
+
+function realOr(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return p;
+  }
+}
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -68,7 +93,14 @@ function ensureServer(): Promise<void> {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${actualPort}`);
     // Path shape: /t/<taskId>/<rest...>  (decodeURIComponent guards %2F tricks)
-    const m = decodeURIComponent(url.pathname).match(/^\/t\/([^/]+)\/(.*)$/);
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(url.pathname);
+    } catch {
+      res.writeHead(400).end("bad request");
+      return;
+    }
+    const m = decoded.match(/^\/t\/([^/]+)\/(.*)$/);
     if (!m) {
       res.writeHead(404).end("not found");
       return;
@@ -80,13 +112,19 @@ function ensureServer(): Promise<void> {
       return;
     }
     const rel = rest === "" ? "index.html" : rest;
-    const target = pathResolve(workdir, normalize(rel));
+    const root = pathResolve(workdir);
+    const target = pathResolve(root, normalize(rel));
     // Traversal guard: resolved path must stay inside the workdir.
-    if (!target.startsWith(pathResolve(workdir) + "/") && target !== pathResolve(workdir)) {
+    if (!isWithin(root, target)) {
       res.writeHead(404).end("not found");
       return;
     }
     if (!existsSync(target) || !statSync(target).isFile()) {
+      res.writeHead(404).end("not found");
+      return;
+    }
+    // Symlink guard: the real file must also live inside the real workdir.
+    if (!isWithin(realOr(root), realOr(target))) {
       res.writeHead(404).end("not found");
       return;
     }
@@ -114,7 +152,7 @@ function ensureServer(): Promise<void> {
   server!.on("close", onDead);
   listening = new Promise<void>((resolveP, rejectP) => {
     server!.once("error", rejectP);
-    server!.listen(PREVIEW_PORT, () => {
+    server!.listen(PREVIEW_PORT, PREVIEW_HOST, () => {
       const addr = server!.address();
       if (addr && typeof addr === "object") actualPort = addr.port;
       bindCount++;

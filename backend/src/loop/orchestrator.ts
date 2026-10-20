@@ -64,7 +64,7 @@ import {
   resolveConnectionModel,
 } from "../store/connections.js";
 import { ensureFreshHealth } from "./connection-health.js";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -545,6 +545,10 @@ export async function runLoop(taskId: string): Promise<void> {
     ACTIVE_LOOPS.delete(taskId);
     return;
   }
+  // The workdir must exist before chokidar attaches: createTask only fires
+  // a non-awaited mkdir, and on Windows a watcher started on a missing dir
+  // never reports later writes ("agent exited before writing GOAL.md").
+  await mkdir(initialTask.workdir, { recursive: true }).catch(() => {});
   // Fresh-run hygiene: a brand-new planning run must not inherit the
   // previous task's Diff Summaries / verdicts in STATE.md — they bloat
   // and confuse the verifier prompt. Resume paths (saved plan or diff)
@@ -1441,6 +1445,13 @@ try {
         return;
       }
       verifierTarget = verifierPreflight.target;
+      // Snapshot STATE.md before the verifier runs: the verdict is parsed
+      // ONLY from what the verifier appends, so a verdict section planted
+      // earlier (e.g. by the maker) can never be read as the verifier's.
+      const stateBeforeVerify = await readFile(
+        pathResolve(task.workdir, "STATE.md"),
+        "utf8"
+      ).catch(() => "");
       const verifier = spawnVerifier(
         taskId,
         task.workdir,
@@ -1615,7 +1626,23 @@ try {
         }
       }
 
-      let { verdict } = parseStateDiff(stateAfterVerify);
+      let { verdict } = parseStateDiff(verifierOwnedText(stateBeforeVerify, stateAfterVerify));
+      if (verdict && verdict.attempt !== attempt) {
+        log(
+          "verifier",
+          "stderr",
+          `✗ verdict is labelled attempt ${verdict.attempt} but this is attempt ${attempt} — treating as REJECT`
+        );
+        verdict = {
+          ...verdict,
+          attempt,
+          outcome: "REJECT",
+          requiredFixes: [
+            `Verdict attempt mismatch (got ${verdict.attempt}, expected ${attempt})`,
+            ...verdict.requiredFixes,
+          ],
+        };
+      }
       // Final verifier_progress event (done: true) so the UI freezes
       // the live score, then tear down the streaming subscription.
       // We do this BEFORE the `!verdict` early-return so the cleanup
@@ -1709,7 +1736,7 @@ try {
             strictVerifier,
             "verifier"
           );
-          const reparsed = parseStateDiff(stateRetry).verdict;
+          const reparsed = parseStateDiff(verifierOwnedText(stateAfterVerify, stateRetry)).verdict;
           if (reparsed && reparsed.criteriaWalk.length > 0) {
             verdict = reparsed;
             stateAfterVerify = stateRetry;
@@ -1949,6 +1976,28 @@ try {
         );
         // Fall through to the next iteration of the while loop. No
         // `waitForEvent("feedback")` — the loop is autonomous.
+      } else if (getTask(taskId)?.autoIterate) {
+        // Autonomous mode (batch items): the verifier's required fixes become
+        // the next maker attempt's feedback. The max-attempts cap still ends
+        // the loop with an escalation, so this can't spin forever.
+        const failed = verdict.criteriaWalk.filter((c) => !c.passed);
+        const autoFeedback = [
+          `Verifier REJECTED attempt ${attempt}: ${verdict.oneLineReason}`,
+          ...(verdict.requiredFixes.length > 0
+            ? ["Required fixes:", ...verdict.requiredFixes.map((f, i) => `${i + 1}. ${f}`)]
+            : []),
+          ...(failed.length > 0
+            ? ["Failed criteria:", ...failed.map((c, i) => `${i + 1}. ${c.criterion} — ${c.evidence || "no evidence"}`)]
+            : []),
+        ].join("\n");
+        LAST_FEEDBACK.set(taskId, autoFeedback);
+        nodeStatus("verdict", "error");
+        nodeStatus("retry", "running");
+        log(
+          "orchestrator",
+          "info",
+          `▶ AUTO-ITERATE — REJECT on attempt ${attempt}; feeding ${verdict.requiredFixes.length} required fix(es) to attempt ${attempt + 1}`
+        );
       } else {
         nodeStatus("verdict", "waiting");
         nodeStatus("retry", "waiting");
@@ -2113,6 +2162,17 @@ async function awaitPhaseOutput(
   throw new Error(
     `agent exited with code ${winner} before writing ${filename}`
   );
+}
+
+/**
+ * The part of STATE.md written during the verifier phase. Verifiers append
+ * (streamed or single-shot), so normally this is the suffix after the
+ * pre-verify snapshot. If the file was replaced wholesale (Mavis bridge
+ * writes its final reply), the whole new content is the verifier's.
+ */
+export function verifierOwnedText(before: string, after: string): string {
+  if (before && after.startsWith(before)) return after.slice(before.length);
+  return after;
 }
 
 /** Grace period after agent exit, in ms, before declaring the agent crashed. */

@@ -124,15 +124,40 @@ const AGENT_HANDLES = new Map<string, AgentHandle>();
  */
 const OPENCODE_AVAILABLE: boolean = (() => {
   try {
-    const probe = spawnSync("opencode", ["--version"], {
-      stdio: "ignore",
-      shell: false,
-    });
-    return probe.status !== null && !probe.error;
+    // On Windows `opencode` is usually an npm .cmd shim, which can't be
+    // exec'd without a shell — probe via cmd.exe there. The command is a
+    // fixed literal (no user input). 5s cap so a hung binary can't stall
+    // module load.
+    const probe =
+      process.platform === "win32"
+        ? spawnSync("opencode --version", {
+            stdio: "ignore",
+            shell: true,
+            timeout: 5_000,
+            windowsHide: true,
+          })
+        : spawnSync("opencode", ["--version"], {
+            stdio: "ignore",
+            shell: false,
+            timeout: 5_000,
+          });
+    if (probe.error) return false;
+    // Through cmd.exe a missing binary is exit 1 ("not recognized"), not
+    // ENOENT, so require a clean exit 0 there.
+    return process.platform === "win32" ? probe.status === 0 : probe.status !== null;
   } catch {
     return false;
   }
 })();
+if (!OPENCODE_AVAILABLE && process.env.LOOP_USE_LLM_BRIDGE === "0" && process.env.LOOP_ALLOW_MOCK !== "1") {
+  console.warn(
+    "\n[agent-spawner] WARNING: `opencode` CLI not found or not runnable " +
+      "(probe `opencode --version` failed). Tasks that need the opencode " +
+      "runner will refuse to start (mock agents need LOOP_ALLOW_MOCK=1).\n" +
+      "[agent-spawner] Install opencode / fix PATH, or set LOOP_ALLOW_MOCK=1 " +
+      "to acknowledge mock mode and silence this warning.\n"
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Bridge runner — invokes `node llm-agent.mjs` instead of `opencode`.
@@ -436,7 +461,17 @@ export function spawnAgent(
     AGENT_HANDLES.delete(taskId);
   }
 
-  if (!OPENCODE_AVAILABLE) {
+  // The LLM bridge (llm-agent.mjs) doesn't need the opencode binary, so a
+  // missing opencode must not silently swap real agents for mocks (that
+  // used to happen on every Windows box where opencode is an npm .cmd shim).
+  // Mocks — whose verifier always APPROVEs — now require an explicit opt-in.
+  const bridgeEnabled = process.env.LOOP_USE_LLM_BRIDGE !== "0";
+  if (!OPENCODE_AVAILABLE && !bridgeEnabled) {
+    if (process.env.LOOP_ALLOW_MOCK !== "1") {
+      throw new Error(
+        "opencode is not available and the LLM bridge is disabled (LOOP_USE_LLM_BRIDGE=0) — refusing to run mock agents; set LOOP_ALLOW_MOCK=1 for a demo run"
+      );
+    }
     const handle = spawnMock(
       agent,
       taskId,

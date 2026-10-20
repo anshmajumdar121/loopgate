@@ -20,7 +20,7 @@
 
 import { readFile, access, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 
 export interface BuildRunResult {
@@ -39,14 +39,50 @@ export interface BuildRunResult {
   outputDir?: string;
 }
 
-const INSTALL_TIMEOUT_MS = 10 * 60_000;
-const SCRIPT_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60_000;
+let INSTALL_TIMEOUT_MS = DEFAULT_INSTALL_TIMEOUT_MS;
+let SCRIPT_TIMEOUT_MS = DEFAULT_SCRIPT_TIMEOUT_MS;
+
+/** Test hook: shrink stage timeouts (pass null to restore defaults). */
+export function __setStageTimeoutsForTests(
+  t: { installMs?: number; scriptMs?: number } | null
+): void {
+  INSTALL_TIMEOUT_MS = t?.installMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
+  SCRIPT_TIMEOUT_MS = t?.scriptMs ?? DEFAULT_SCRIPT_TIMEOUT_MS;
+}
 const TAIL_LINES = 100;
 
 /** Env vars children are allowed to inherit. Everything else — including
  *  any API keys / connection secrets in the orchestrator's env — is
  *  scrubbed. */
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "SHELL"];
+/** Extra vars Windows needs for npm/node/cmd.exe to function at all
+ *  (SystemRoot for DLL loading, ComSpec for shell:true, PATHEXT for .cmd
+ *  shim resolution, APPDATA for npm's global prefix/cache, ...). None of
+ *  these carry secrets. */
+const WIN32_ENV_ALLOWLIST = [
+  "SystemRoot",
+  "SystemDrive",
+  "windir",
+  "ComSpec",
+  "PATHEXT",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "TEMP",
+  "TMP",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramData",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "OS",
+];
+
+const IS_WIN32 = process.platform === "win32";
 
 /** package.json hash per workdir, so re-attempts skip redundant installs. */
 const lastPkgHash = new Map<string, string>();
@@ -56,12 +92,51 @@ export function resetBuildRunnerCache(): void {
   lastPkgHash.clear();
 }
 
-function scrubbedEnv(): NodeJS.ProcessEnv {
+/** Exported for tests. Windows env keys are case-insensitive (`Path` vs
+ *  `PATH`), so match case-insensitively there and keep the source casing. */
+export function scrubbedEnv(
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of ENV_ALLOWLIST) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+  const allow = platform === "win32" ? [...ENV_ALLOWLIST, ...WIN32_ENV_ALLOWLIST] : ENV_ALLOWLIST;
+  if (platform === "win32") {
+    const wanted = new Set(allow.map((k) => k.toLowerCase()));
+    for (const [key, value] of Object.entries(source)) {
+      if (value !== undefined && wanted.has(key.toLowerCase())) env[key] = value;
+    }
+  } else {
+    for (const key of allow) {
+      if (source[key] !== undefined) env[key] = source[key];
+    }
   }
   return env;
+}
+
+/** Kill a stage and everything it spawned (npm → sh/cmd → node ...). */
+function killTree(proc: ChildProcess): void {
+  const pid = proc.pid;
+  if (pid === undefined) return;
+  if (IS_WIN32) {
+    try {
+      // /T = whole tree, /F = force. Fire-and-forget; errors (already
+      // exited) are irrelevant.
+      const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.on("error", () => proc.kill("SIGKILL"));
+    } catch {
+      proc.kill("SIGKILL");
+    }
+    return;
+  }
+  try {
+    // Negative pid = the whole process group (child was spawned detached).
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    proc.kill("SIGKILL");
+  }
 }
 
 /**
@@ -176,11 +251,27 @@ function runStage(
 ): Promise<StageResult> {
   const start = Date.now();
   return new Promise((resolve) => {
-    const proc = spawn("npm", npmArgs, {
-      cwd: workdir,
-      env: scrubbedEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // On Windows npm is a .cmd shim, which CreateProcess can't execute
+    // without a shell. shell:true is safe here: args are fixed literals
+    // from this module (install/run build/run test), never user strings.
+    // They're pre-joined into one command string (no args array) so Node
+    // doesn't emit DEP0190 for shell:true + args.
+    const proc = IS_WIN32
+      ? spawn(["npm.cmd", ...npmArgs].join(" "), {
+          cwd: workdir,
+          env: scrubbedEnv(),
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: true,
+          windowsHide: true,
+        })
+      : spawn("npm", npmArgs, {
+          cwd: workdir,
+          env: scrubbedEnv(),
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false,
+          // Own process group so a timeout can kill(-pid) the whole tree.
+          detached: true,
+        });
     const lines: string[] = [];
     const capture = (chunk: Buffer) => {
       for (const line of chunk.toString("utf8").split("\n")) {
@@ -191,7 +282,7 @@ function runStage(
     proc.stdout.on("data", capture);
     proc.stderr.on("data", capture);
     const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
+      killTree(proc);
       lines.push(`(stage timed out after ${timeoutMs / 1000}s and was killed)`);
     }, timeoutMs);
     proc.on("error", (err) => {
