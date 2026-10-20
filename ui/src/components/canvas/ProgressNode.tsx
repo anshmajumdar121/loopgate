@@ -1,29 +1,29 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
 import {
   Handle,
+  NodeResizeControl,
   NodeResizer,
   Position,
   type NodeProps,
 } from "@xyflow/react";
 import {
-  ChevronLeft,
-  CheckCircle2,
-  Loader2,
+  AlertTriangle,
+  Check,
   Compass,
-  UserCheck,
-  Wrench,
+  FileCode2,
+  Loader2,
   ShieldCheck,
   Sparkles,
-  AlertTriangle,
-  CircleDashed,
-  ArrowLeft,
-  Circle,
+  UserCheck,
+  Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useWorkflow } from "@/lib/store";
 import type { RunStatus } from "@/data/workflow";
 import type {
+  AttemptRecord,
   DiffSummary,
   LogEntry,
   PlanSummary,
@@ -34,957 +34,606 @@ import type {
 import { AttemptTimeline } from "@/components/AttemptTimeline";
 
 interface ProgressNodeData extends Record<string, unknown> {
-  spec: {
-    id: string;
-    kind: string;
-    title: string;
-    subtitle?: string;
-    iconName: string;
-  };
+  spec: { id: string; kind: string; title: string; subtitle?: string; iconName: string };
   icon: LucideIcon;
   status: RunStatus;
 }
 
 type StepStatus = "done" | "active" | "waiting" | "error";
+type StepId = "planning" | "plan_review" | "implementation" | "verification";
 
-interface StepDef {
-  id: string;
-  index: number;
-  label: string;
-  description: string;
-  icon: LucideIcon;
+interface LiveScore {
+  attempt: number;
+  passed: number;
+  total: number;
+  partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
+  done: boolean;
 }
 
-const STEPS: StepDef[] = [
-  {
-    id: "planning",
-    index: 1,
-    label: "Planning",
-    description: "Planner explores the codebase and writes GOAL.md.",
-    icon: Compass,
-  },
-  {
-    id: "plan_review",
-    index: 2,
-    label: "Plan review",
-    description: "Confirm or adjust the plan before implementation.",
-    icon: UserCheck,
-  },
-  {
-    id: "implementation",
-    index: 3,
-    label: "Implementation",
-    description: "Maker writes the code and runs the build + tests.",
-    icon: Wrench,
-  },
-  {
-    id: "verification",
-    index: 4,
-    label: "Verification",
-    description: "Verifier re-runs tests and returns APPROVE/REJECT.",
-    icon: ShieldCheck,
-  },
+const STEPS: { id: StepId; label: string; role: string; icon: LucideIcon; waiting: string }[] = [
+  { id: "planning", label: "Plan", role: "planner", icon: Compass, waiting: "Turns the request into acceptance criteria and a file allowlist." },
+  { id: "plan_review", label: "Review plan", role: "gate", icon: UserCheck, waiting: "Plan is approved before any file is written." },
+  { id: "implementation", label: "Implement", role: "maker", icon: Wrench, waiting: "Maker writes only the files the plan allows." },
+  { id: "verification", label: "Verify", role: "verifier", icon: ShieldCheck, waiting: "An independent verifier checks every criterion." },
 ];
 
 /**
- * Loop progress node on the canvas. Mirrors Image 2 / Image 3:
- *   - numbered step list (Planning → Plan review → Implementation → Verification)
- *   - green checkmark for done, green ring + index for active, gray for waiting
- *   - active step gets a continuous green left-border line (the
- *     "green line" connecting previous done step to the active one)
- *   - each step has a one-line summary of what it did; the active
- *     step shows a live "Doing now:" line tailing the latest log
- *     entry for its phase
- *   - expanded details (plan criteria, diff stats, verdict stats)
- *     live inline below each step — no click-to-expand required
- *   - the whole thing lights up the moment the loop starts
- *
- * Compact enough to fit inside RICH_NODE_HEIGHT (280) without
- * scrolling for the common case (planning / plan review); bigger
- * tasks add scroll via `overflow-y-auto`.
+ * Loop progress card on the canvas: a vertical timeline of the four loop
+ * phases. Each phase shows who did it (role tag), how long it took, and the
+ * concrete artifacts — criteria, allowed files, files written, the
+ * verifier's evidence per criterion — so a viewer can follow exactly what
+ * happened and why the loop decided what it did. Resizable from the corner
+ * grip at any time (all edges when selected).
  */
 function ProgressNodeImpl({ data, selected }: NodeProps) {
-  const Icon = (data.icon as LucideIcon) ?? Sparkles;
   const spec = data.spec as ProgressNodeData["spec"];
+  void spec;
   const phase = useWorkflow((s) => s.phase);
   const task = useWorkflow((s) => s.taskMirror);
   const plan = useWorkflow((s) => s.plan);
   const diff = useWorkflow((s) => s.diff);
   const verdict = useWorkflow((s) => s.verdict);
-  const liveScore = useWorkflow((s) => s.liveScore);
+  const liveScore = useWorkflow((s) => s.liveScore) as LiveScore | null;
   const escalationReason = useWorkflow((s) => s.escalationReason);
-  const doneSummary = useWorkflow((s) => s.doneSummary);
   const isRunning = useWorkflow((s) => s.isRunning);
   const logs = useWorkflow((s) => s.logs);
 
-  // A freshly loaded task already carries its persisted status, while the
-  // first live phase event may still be in flight. Prefer that status so the
-  // node never renders an empty/idle state during the handoff.
   const effectivePhase = phase ?? task?.status ?? null;
-  const effectiveIsRunning = isRunning || isActiveTaskStatus(effectivePhase);
-  const effectiveEscalationReason =
-    escalationReason ?? task?.escalationReason ?? null;
-  const effectiveDoneSummary =
-    doneSummary ?? task?.verdict?.oneLineReason ?? null;
+  const running = isRunning || isActiveTaskStatus(effectivePhase);
+  const escReason = escalationReason ?? task?.escalationReason ?? null;
+  const lastAttempt: AttemptRecord | undefined = task?.attempts?.[task.attempts.length - 1];
 
-  // Map backend phase → active step id. We collapse "done" and
-  // "escalated" to verification so the last step lights up.
-  const activeStep = useMemo(() => {
+  const activeStep: StepId | null = useMemo(() => {
     if (!effectivePhase || effectivePhase === "draft" || effectivePhase === "cancelled") return null;
-    if (effectivePhase === "done" || effectivePhase === "escalated") return "verification";
+    if (effectivePhase === "done" || effectivePhase === "escalated" || effectivePhase === "verifying") return "verification";
     if (effectivePhase === "implementing") return "implementation";
-    if (effectivePhase === "verifying") return "verification";
-    return effectivePhase;
+    return effectivePhase as StepId;
   }, [effectivePhase]);
 
-  const stepStatus = (stepId: string): StepStatus => {
+  const order = STEPS.map((s) => s.id);
+  const stepStatus = (id: StepId): StepStatus => {
     if (effectivePhase === "done") return "done";
-    if (effectivePhase === "escalated") {
-      const order = STEPS.map((s) => s.id);
-      const thisIdx = order.indexOf(stepId);
-      const escIdx = order.indexOf("verification");
-      if (thisIdx < escIdx) return "done";
-      if (thisIdx === escIdx) return "error";
-      return "waiting";
-    }
     if (!activeStep) return "waiting";
-    const order = STEPS.map((s) => s.id);
-    const activeIdx = order.indexOf(activeStep);
-    const thisIdx = order.indexOf(stepId);
-    if (thisIdx < activeIdx) return "done";
-    if (thisIdx === activeIdx) return "active";
+    const a = order.indexOf(activeStep);
+    const i = order.indexOf(id);
+    if (i < a) return "done";
+    if (i === a) return effectivePhase === "escalated" ? "error" : "active";
     return "waiting";
   };
 
-  // "Doing now:" text for the active step — pulls the most recent
-  // log entry from that phase's agent. If no per-phase log exists,
-  // fall back to the very latest log entry overall.
-  const latestLog = useMemo(() => {
-    if (!logs || logs.length === 0) return null;
-    return logs[logs.length - 1];
-  }, [logs]);
-
-  // Most recent LLM latency line for the active phase's agent — the
-  // backend emits `[<agent>] LLM OK in Nms, ...` after every LLM call.
-  // Surfaced on the active step so the user can see it's LLM latency,
-  // not a hang, when a step is in the long part of its work.
-  function latestLatencyMsForStep(stepId: string): number | null {
-    const phaseAgent = phaseAgentFor(stepId);
-    if (!phaseAgent) return null;
-    const re = new RegExp(
-      `\\[${phaseAgent}\\]\\s+LLM\\s+OK\\s+in\\s+(\\d+)ms`
-    );
-    for (let i = logs.length - 1; i >= Math.max(0, logs.length - 50); i--) {
+  const latencyMs = (role: string): number | null => {
+    const re = new RegExp(`\\[${role}\\]\\s+LLM\\s+OK\\s+in\\s+(\\d+)ms`);
+    for (let i = logs.length - 1; i >= Math.max(0, logs.length - 80); i--) {
       const m = logs[i].text?.match(re);
       if (m) return Number(m[1]);
     }
     return null;
-  }
-  function formatLatency(ms: number): string {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
-  }
-
-  function activeLiveText(stepId: string): string {
-    const phaseAgent = phaseAgentFor(stepId);
-    const recentForPhase = phaseAgent
-      ? [...logs].reverse().find((l) => l.agent === phaseAgent)
-      : undefined;
-    const text = recentForPhase?.text ?? latestLog?.text;
-    if (!text) return phaseActivityLine(stepId, task);
-    return truncate(text.replace(/\s+/g, " ").trim(), 120);
-  }
-
-  // Synthesized one-line summary per step + status:
-  //   done   → "Planner wrote a 3-step plan touching 2 files."
-  //   active → "Doing now: <latest log line>"
-  //   waiting → "Waiting for earlier steps to finish."
-  //   error  → escalation reason
-  function stepSummary(stepId: string, status: StepStatus): string {
-    if (status === "waiting") return "Waiting for earlier steps to finish.";
-    if (status === "error") {
-      return effectiveEscalationReason ?? "Failed.";
-    }
-    if (status === "active") {
-      // Active step summary — "Doing now: <latest log>". When the most
-      // recent LLM call latency is known for this phase's agent, append
-      // it so the user can tell "model is thinking" from "the loop is
-      // hung". On the planning step, also surface the retry counter
-      // (1/3, 2/3) — the planner is the phase that goes through
-      // re-prompts most often, and the user has no other way to see
-      // that progress.
-      const activity = phaseActivityLine(stepId, task);
-      const liveDetail = activeLiveText(stepId);
-      const parts: string[] = [activity];
-      if (liveDetail !== activity) parts.push(`Doing now: ${liveDetail}`);
-      const ms = latestLatencyMsForStep(stepId);
-      if (ms !== null) parts.push(`last call ${formatLatency(ms)}`);
-      return parts.join(" · ");
-    }
-    // status === "done"
-    if (stepId === "planning") {
-      if (!plan) return "Plan ready.";
-      return `Planner wrote a ${plan.steps}-step plan touching ${plan.filesToTouch.length} file${plan.filesToTouch.length === 1 ? "" : "s"}.`;
-    }
-    if (stepId === "plan_review") return "Plan confirmed.";
-    if (stepId === "implementation") {
-      if (!diff) return "Implementation done.";
-      const build =
-        diff.buildExit == null ? "n/a" : diff.buildExit === 0 ? "passed" : "failed";
-      const testTotal = diff.testsPassed + diff.testsFailed;
-      const tests = testTotal === 0 ? "n/a" : `${diff.testsPassed}/${testTotal}`;
-      return `Maker changed ${diff.filesChanged.length} file${diff.filesChanged.length === 1 ? "" : "s"} (build ${build}, tests ${tests}).`;
-    }
-    if (stepId === "verification") {
-      if (!verdict) return "Verification done.";
-      const outcome =
-        verdict.outcome === "APPROVE"
-          ? "approved"
-          : verdict.outcome === "REJECT"
-          ? "rejected"
-          : "escalated";
-      const vTotal = verdict.testsPassed + verdict.testsFailed;
-      const tests = vTotal === 0 ? "n/a" : `${verdict.testsPassed}/${vTotal}`;
-      const reason = verdict.oneLineReason ? ` — ${truncate(verdict.oneLineReason, 92)}` : "";
-      return `Verifier ${outcome} the change (tests ${tests}, risk ${verdict.risk})${reason}.`;
-    }
-    return "";
-  }
-
-  const headerLabel = task?.title ?? "Loop progress";
-  const headerStatus: string = useMemo(() => {
-    switch (effectivePhase) {
-      case "done":
-        return "Complete";
-      case "escalated":
-        return "Escalated";
-      case "cancelled":
-        return "Cancelled";
-      case "planning":
-        return "Planning";
-      case "plan_review":
-        return "Plan review";
-      case "implementing":
-        return "Implementing";
-      case "verifying":
-        return "Verifying";
-      default:
-        return effectiveIsRunning ? "Running" : "Idle";
-    }
-  }, [effectivePhase, effectiveIsRunning]);
-
-  /**
-   * Same React Flow interaction-escape pattern as the chatbot node —
-   * stop mouse / touch events from being captured by the node's drag
-   * handler so step row interactions work.
-   */
-  const stopReactFlowPointer = (e: React.SyntheticEvent) => {
-    e.stopPropagation();
   };
+  const durationFor = (id: StepId): number | null => {
+    if (id === "planning") return latencyMs("planner");
+    if (id === "implementation") return lastAttempt?.makerMs ?? latencyMs("maker");
+    if (id === "verification") return lastAttempt?.verifierMs ?? latencyMs("verifier");
+    return null;
+  };
+  const liveLine = (id: StepId): string => {
+    const agent = phaseAgentFor(id);
+    const recent = agent ? [...logs].reverse().find((l) => l.agent === agent) : undefined;
+    const text = recent?.text?.replace(/\s+/g, " ").trim();
+    return text ? truncate(text, 110) : phaseActivityLine(id, task);
+  };
+
+  const totalMs =
+    task && (effectivePhase === "done" || effectivePhase === "escalated")
+      ? Date.parse(task.updatedAt) - Date.parse(task.createdAt)
+      : null;
+  const modelLabel = shortModel(task?.model);
+  const attemptLabel = task && task.attempt > 0 ? `attempt ${task.attempt}/${task.maxAttempts ?? 3}` : null;
+
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
 
   return (
     <div
       className={cn(
-        "relative h-full w-full overflow-hidden rounded-2xl border bg-white shadow-card transition-shadow dark:bg-zinc-900",
-        selected
-          ? "border-emerald-400 ring-2 ring-emerald-400/30 dark:border-emerald-500 dark:ring-emerald-500/30"
-          : "border-zinc-200 dark:border-zinc-800"
+        "relative flex h-full w-full flex-col overflow-hidden rounded-xl border bg-white shadow-card dark:bg-zinc-950",
+        selected ? "border-violet-400/70 ring-1 ring-violet-400/30" : "border-zinc-200 dark:border-zinc-800"
       )}
     >
-      {/* Drag-to-resize handles on all 4 corners/edges, visible only
-          when the node is selected — lets users grow the node when
-          AttemptTimeline content is tall, or shrink it back down. */}
       <NodeResizer
         isVisible={selected}
-        minWidth={320}
-        minHeight={200}
-        maxWidth={900}
-        maxHeight={1000}
-        handleClassName="!h-2.5 !w-2.5 !rounded-sm !border !border-emerald-500 !bg-white dark:!bg-zinc-900"
-        lineClassName="!border-emerald-400/60"
+        minWidth={340}
+        minHeight={220}
+        maxWidth={960}
+        maxHeight={1400}
+        handleClassName="!h-2 !w-2 !rounded-sm !border !border-violet-400 !bg-white dark:!bg-zinc-900"
+        lineClassName="!border-violet-400/40"
       />
-
-      {/* React Flow handles — left/right. The wire from the
-          orchestrator enters here. */}
-      <Handle
-        type="source"
-        position={Position.Right}
-        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white !bg-zinc-300 dark:!border-zinc-900"
-      />
-      <Handle
-        type="target"
-        position={Position.Left}
-        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white !bg-emerald-500 dark:!border-zinc-900"
-      />
-
-      {/* Header — mirrors Image 2/3. Task title (or generic label) on
-          the left, status pill on the right. This is the only drag
-          handle so the step rows inside don't fight React Flow. */}
-      <div className="nodrag flex cursor-move items-center gap-2 border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
-        <button
-          type="button"
-          onClick={(e) => e.stopPropagation()}
-          className="grid h-5 w-5 place-items-center rounded-md text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-          title="Back"
+      {/* Always-available corner grip: drag to resize without selecting first. */}
+      <NodeResizeControl
+        position="bottom-right"
+        minWidth={340}
+        minHeight={220}
+        maxWidth={960}
+        maxHeight={1400}
+        style={{ background: "transparent", border: "none", zIndex: 20 }}
+      >
+        <span
+          className="absolute -bottom-0.5 -right-0.5 block h-4 w-4 cursor-nwse-resize text-zinc-400 hover:text-violet-400 dark:text-zinc-600"
+          title="Drag to resize"
+          aria-label="Resize card"
         >
-          <ChevronLeft size={12} />
-        </button>
-        <div className="grid h-5 w-5 place-items-center rounded-md bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
-          <Icon size={10} strokeWidth={2.4} />
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+            <path d="M13 7 7 13M13 10.5 10.5 13" />
+          </svg>
+        </span>
+      </NodeResizeControl>
+
+      <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white !bg-zinc-400 dark:!border-zinc-950" />
+      <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white !bg-emerald-500 dark:!border-zinc-950" />
+
+      {/* Header — same chip language as the top bar. */}
+      <div className="shrink-0 cursor-move border-b border-zinc-200 px-3.5 pb-2.5 pt-3 dark:border-zinc-800">
+        <div className="flex items-center gap-2">
+          <div className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-gradient-to-br from-violet-400 to-violet-700 text-white">
+            <Sparkles size={12} strokeWidth={2.4} />
+          </div>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100" title={task?.title}>
+            {task?.title ?? "Loop progress"}
+          </span>
+          <StatusChip phase={effectivePhase} running={running} />
+          <ScoreChip liveScore={liveScore} verdict={verdict} />
         </div>
-        <span
-          className="truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100"
-          title={task?.title ?? "Loop progress"}
-        >
-          {headerLabel}
-        </span>
-        <span
-          className={cn(
-            "ml-1 rounded-full px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider",
-            effectivePhase === "done"
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-              : effectivePhase === "escalated"
-              ? "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300"
-              : effectiveIsRunning
-              ? "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
-              : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-          )}
-        >
-          {headerStatus}
-        </span>
-        <HeaderScoreBadge liveScore={liveScore} verdict={verdict} />
+        {(modelLabel || attemptLabel || totalMs) && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-8 text-[10.5px] text-zinc-500 dark:text-zinc-400">
+            {modelLabel && (
+              <span className="rounded-md bg-violet-50 px-1.5 py-0.5 font-mono text-[10px] font-medium text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+                {modelLabel}
+              </span>
+            )}
+            {attemptLabel && <span className="font-mono">{attemptLabel}</span>}
+            {totalMs !== null && totalMs > 0 && <span className="font-mono">· {formatMs(totalMs)} total</span>}
+          </div>
+        )}
       </div>
 
-      {/* Step list — Image 2/3's numbered, always-expanded rows.
-          Wrapped in `nodrag nopan` so React Flow doesn't capture the
-          clicks. Each row shows its short summary inline + the
-          per-step expanded details. The active step carries the
-          green left-border line that the brief asks for. */}
+      {/* Timeline */}
       <div
-        className="nodrag nopan max-h-[calc(100%-44px)] space-y-1 overflow-y-auto px-1.5 py-1.5"
-        onPointerDown={stopReactFlowPointer}
-        onMouseDown={stopReactFlowPointer}
-        onTouchStart={stopReactFlowPointer}
-        onClick={stopReactFlowPointer}
+        className="nodrag nopan nowheel min-h-0 flex-1 overflow-y-auto px-3.5 py-3"
+        onPointerDown={stop}
+        onMouseDown={stop}
+        onTouchStart={stop}
+        onClick={stop}
       >
-        {STEPS.map((step) => {
-          const s = stepStatus(step.id);
-          const StepIcon = step.icon;
-          const summary = stepSummary(step.id, s);
-          return (
-            <div
-              key={step.id}
-              className={cn(
-                "rounded-lg px-1.5 py-1.5",
-                // The "green line" — a 2px emerald left border on the
-                // active step. Image 3 shows this as a continuous
-                // vertical bar; we approximate with border-l-2 +
-                // emerald tint background.
-                s === "active" &&
-                  "border-l-2 border-emerald-500 bg-emerald-50/70 pl-2 dark:bg-emerald-500/10"
-              )}
-            >
-              <div className="flex items-start gap-2">
-                <StepBadge status={s} index={step.index} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <StepIcon
-                      size={11}
+        {!effectivePhase ? (
+          <p className="py-8 text-center text-[11.5px] text-zinc-500">No task running. Start one from the chat or a Batch.</p>
+        ) : (
+          <ol className="relative">
+            {STEPS.map((step, idx) => {
+              const s = stepStatus(step.id);
+              const ms = s === "done" || s === "error" ? durationFor(step.id) : null;
+              return (
+                <li key={step.id} className="relative flex gap-3 pb-4 last:pb-1">
+                  {idx < STEPS.length - 1 && (
+                    <span
+                      aria-hidden
                       className={cn(
-                        s === "done" && "text-emerald-600",
-                        s === "active" && "text-emerald-600",
-                        s === "error" && "text-rose-500",
-                        s === "waiting" && "text-zinc-400"
+                        "absolute left-[9px] top-6 h-[calc(100%-20px)] w-px",
+                        s === "done" ? "bg-emerald-500/50" : "bg-zinc-200 dark:bg-zinc-800"
                       )}
                     />
-                    <span
-                      className={cn(
-                        "truncate text-[12px] font-semibold",
-                        s === "done" && "text-zinc-700 dark:text-zinc-200",
-                        s === "active" &&
-                          "text-emerald-700 dark:text-emerald-300",
-                        s === "error" &&
-                          "text-rose-700 dark:text-rose-300",
-                        s === "waiting" &&
-                          "text-zinc-500 dark:text-zinc-400"
+                  )}
+                  <Dot status={s} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "text-[12.5px] font-semibold",
+                          s === "waiting" ? "text-zinc-400 dark:text-zinc-500" : "text-zinc-900 dark:text-zinc-100"
+                        )}
+                      >
+                        {step.label}
+                      </span>
+                      <span className="rounded-md border border-zinc-200 px-1.5 py-px font-mono text-[9.5px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800 dark:text-zinc-500">
+                        {step.role}
+                      </span>
+                      {ms !== null && (
+                        <span className="ml-auto font-mono text-[10.5px] tabular-nums text-zinc-500">{formatMs(ms)}</span>
                       )}
-                    >
-                      {step.label}
-                    </span>
-                    {s === "active" && (
-                      <Loader2
-                        size={10}
-                        className="ml-auto shrink-0 animate-spin text-emerald-500"
-                      />
-                    )}
-                  </div>
-                  <p
-                    className={cn(
-                      "mt-0.5 text-[10.5px] leading-snug",
-                      s === "done" && "text-zinc-600 dark:text-zinc-300",
-                      s === "active" &&
-                        "text-emerald-700 dark:text-emerald-300",
-                      s === "error" &&
-                        "text-rose-700 dark:text-rose-300",
-                      s === "waiting" &&
-                        "text-zinc-400 dark:text-zinc-500"
-                    )}
-                    title={summary}
-                  >
-                    {summary}
-                  </p>
-                  {/* Per-step expanded details — kept inline (no click
-                      needed). Plan criteria, diff stats, verdict
-                      stats, etc. Show only when status is done / error /
-                      active; waiting rows just show the summary. */}
-                  {(s === "done" || s === "active" || s === "error") && (
-                    <StepDetail
-                      stepId={step.id}
+                      {s === "active" && <Loader2 size={12} className="ml-auto animate-spin text-violet-400" />}
+                    </div>
+                    <StepBody
+                      id={step.id}
                       status={s}
+                      waitingText={step.waiting}
+                      liveText={s === "active" ? liveLine(step.id) : ""}
+                      task={task}
                       plan={plan}
                       diff={diff}
                       verdict={verdict}
                       liveScore={liveScore}
-                      escalationReason={effectiveEscalationReason}
+                      lastAttempt={lastAttempt}
+                      escalationReason={escReason}
                     />
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
 
-        {/* Terminal state footer — done or escalated. */}
         {(effectivePhase === "done" || effectivePhase === "escalated") && (
-          <div className="mt-1 border-t border-zinc-100 px-1.5 py-2 dark:border-zinc-800">
-            <FinalState
-              phase={effectivePhase}
-              doneSummary={effectiveDoneSummary}
-              escalationReason={effectiveEscalationReason}
-            />
-          </div>
+          <ResultBanner phase={effectivePhase} task={task} verdict={verdict} escalationReason={escReason} />
         )}
 
-        {!effectivePhase && (
-          <p className="px-3 py-6 text-center text-[11px] text-zinc-400">
-            No task running. Start one from the chatbot.
-          </p>
-        )}
-
-        {/* Full-width block, not a header chip — was mistakenly mounted
-            in the single-line header flex row, which pushed its content
-            off the right edge of the node. Scrolls with the step list. */}
         <AttemptTimeline task={task} />
       </div>
     </div>
   );
 }
 
-/**
- * Numbered badge — matches Image 2/3.
- *   done   = green filled circle with white check
- *   active = white circle with green ring + index number
- *   error  = white circle with rose ring + !
- *   waiting = white circle with gray ring + index number
- */
-function StepBadge({ status, index }: { status: StepStatus; index: number }) {
-  if (status === "done") {
+// ── pieces ───────────────────────────────────────────────────────────────
+
+function Dot({ status }: { status: StepStatus }) {
+  const base = "relative z-10 mt-0.5 grid h-[19px] w-[19px] shrink-0 place-items-center rounded-full";
+  if (status === "done")
     return (
-      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-500 text-white">
-        <CheckCircle2 size={11} strokeWidth={2.5} />
+      <span className={cn(base, "bg-emerald-500/15 text-emerald-500 ring-1 ring-emerald-500/50")}>
+        <Check size={11} strokeWidth={3} />
       </span>
     );
-  }
-  if (status === "active") {
+  if (status === "active")
     return (
-      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full border-2 border-emerald-500 bg-white text-[10px] font-bold text-emerald-700 dark:bg-zinc-900 dark:text-emerald-300">
-        {index}
+      <span className={cn(base, "bg-violet-500/15 ring-1 ring-violet-400/60")}>
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
       </span>
     );
-  }
-  if (status === "error") {
+  if (status === "error")
     return (
-      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full border-2 border-rose-400 bg-white text-rose-600 dark:bg-zinc-900">
-        <AlertTriangle size={10} />
+      <span className={cn(base, "bg-rose-500/15 text-rose-400 ring-1 ring-rose-500/50")}>
+        <X size={11} strokeWidth={3} />
       </span>
     );
-  }
+  return <span className={cn(base, "bg-white ring-1 ring-zinc-300 dark:bg-zinc-950 dark:ring-zinc-700")} />;
+}
+
+function Muted({ children }: { children: React.ReactNode }) {
+  return <p className="mt-0.5 text-[11.5px] leading-snug text-zinc-500 dark:text-zinc-400">{children}</p>;
+}
+
+function Label({ children }: { children: React.ReactNode }) {
+  return <div className="mb-1 mt-2 text-[9.5px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">{children}</div>;
+}
+
+function FileChip({ path, tone = "neutral" }: { path: string; tone?: "neutral" | "written" }) {
   return (
-    <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full border border-zinc-300 bg-white text-[10px] font-semibold text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
-      {index}
+    <span
+      className={cn(
+        "inline-flex max-w-full items-center gap-1 truncate rounded-md border px-1.5 py-0.5 font-mono text-[10.5px]",
+        tone === "written"
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+          : "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+      )}
+      title={path}
+    >
+      <FileCode2 size={10} className="shrink-0 opacity-70" />
+      <span className="truncate">{path}</span>
     </span>
   );
 }
 
-/**
- * Inline detail rows for each step. The user wanted summaries always
- * visible (no click-to-expand), but the actual numbers — file counts,
- * build pass/fail, test counts, verdict outcome — are useful too and
- * fit naturally under the summary line.
- */
-function StepDetail({
-  stepId,
-  status,
-  plan,
-  diff,
-  verdict,
-  liveScore,
-  escalationReason,
-}: {
-  stepId: string;
-  status: StepStatus;
-  plan: PlanSummary | null;
-  diff: DiffSummary | null;
-  verdict: Verdict | null;
-  liveScore: {
-    attempt: number;
-    passed: number;
-    total: number;
-    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
-    done: boolean;
-  } | null;
-  escalationReason: string | null;
-}) {
-  if (status === "active") {
-    // Active rows already have the "Doing now:" summary line. The one
-    // exception: the verification step gets a live X/Y PASS counter
-    // because the verifier streams its response into STATE.md and we
-    // can render the running score in real time. This is the
-    // "real-time live score in the verifier node" the user asked for.
-    if (stepId === "verification" && liveScore && liveScore.total > 0) {
-      return <LiveScoreCard liveScore={liveScore} />;
-    }
-    return null;
-  }
-  if (status === "error") {
-    return (
-      <p className="mt-0.5 flex items-start gap-1 text-[10.5px] text-rose-700 dark:text-rose-300">
-        <AlertTriangle size={9} className="mt-0.5 shrink-0" />
-        <span className="line-clamp-3">
-          {escalationReason ?? "Failed."}
-        </span>
-      </p>
-    );
-  }
-  // status === "done"
-  if (stepId === "planning") {
-    if (!plan) return null;
-    return (
-      <ul className="mt-1 space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-        {plan.criteria.length > 0 && (
-          <Row
-            label="Criteria"
-            value={String(plan.criteria.length)}
-          />
-        )}
-        {plan.risks.length > 0 && (
-          <Row label="Risks" value={String(plan.risks.length)} />
-        )}
-        {plan.filesToTouch.length > 0 && (
-          <Row
-            label="Files"
-            value={String(plan.filesToTouch.length)}
-          />
-        )}
-      </ul>
-    );
-  }
-  if (stepId === "implementation") {
-    if (!diff) return null;
-    return (
-      <ul className="mt-1 space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-        <Row
-          label="Build"
-          value={diff.buildExit == null ? "n/a" : diff.buildExit === 0 ? "✓ pass" : "✗ fail"}
-        />
-        <Row
-          label="Tests"
-          value={
-            diff.testsPassed + diff.testsFailed === 0
-              ? "n/a"
-              : `${diff.testsPassed}/${diff.testsPassed + diff.testsFailed}`
-          }
-        />
-        {diff.filesChanged.length > 0 && (
-          <li className="mt-1 space-y-0.5">
-            {diff.filesChanged.map((f, i) => (
-              <div
-                key={i}
-                className="font-mono text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                title={f.reason}
-              >
-                {f.path}
-              </div>
-            ))}
-          </li>
-        )}
-      </ul>
-    );
-  }
-  if (stepId === "verification") {
-    if (!verdict) return null;
-    return (
-      <ul className="mt-1 space-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-        <Row
-          label="Outcome"
-          value={
-            verdict.outcome === "APPROVE"
-              ? "✓ Approve"
-              : verdict.outcome === "REJECT"
-              ? "✗ Reject"
-              : "! Escalate"
-          }
-        />
-        <Row label="Risk" value={verdict.risk} />
-        {typeof verdict.score === "number" && (
-          <Row label="Score" value={`${verdict.score}/100`} />
-        )}
-        {verdict.criteriaWalk.length > 0 && (
-          <li className="mt-1 space-y-0.5">
-            {verdict.criteriaWalk.map((c, i) => (
-              <div
-                key={i}
-                style={{ display: "flex", gap: 4, alignItems: "flex-start", fontSize: 10 }}
-                title={c.evidence}
-              >
-                <span style={{ color: c.passed ? "#3fb950" : "#f85149", flexShrink: 0 }}>
-                  {c.passed ? "✓" : "✗"}
-                </span>
-                <span className="text-zinc-500 dark:text-zinc-400" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {c.criterion}
-                </span>
-              </div>
-            ))}
-          </li>
-        )}
-      </ul>
-    );
-  }
-  return null;
-}
-
-function Row({ label, value }: { label: string; value: string }) {
+function CriterionRow({ text, passed, evidence }: { text: string; passed?: boolean; evidence?: string }) {
   return (
-    <li className="flex items-center justify-between">
-      <span>{label}</span>
-      <span className="font-mono text-zinc-600 dark:text-zinc-300">
-        {value}
+    <li className="flex items-start gap-2 py-0.5">
+      <span
+        className={cn(
+          "mt-[3px] grid h-3 w-3 shrink-0 place-items-center rounded-[3px]",
+          passed === undefined
+            ? "ring-1 ring-zinc-300 dark:ring-zinc-700"
+            : passed
+            ? "bg-emerald-500 text-white"
+            : "bg-rose-500 text-white"
+        )}
+      >
+        {passed !== undefined && (passed ? <Check size={9} strokeWidth={3.5} /> : <X size={9} strokeWidth={3.5} />)}
+      </span>
+      <span className="min-w-0">
+        <span className="text-[11.5px] leading-snug text-zinc-700 dark:text-zinc-200">{text}</span>
+        {evidence && <span className="block truncate text-[10.5px] text-zinc-500" title={evidence}>{evidence}</span>}
       </span>
     </li>
   );
 }
 
-/**
- * Live verifier scorecard — renders the streaming `**Criteria walk:**`
- * as the LLM emits it. Mirrors the shape of the post-verdict details
- * so the transition to "done" is seamless. The "live" cue is a small
- * pulsing dot + the "LIVE" label so the user knows the numbers will
- * keep updating.
- */
-/**
- * Convert a (passed, total) pair from the criteria walk into the
- * 0–10 scale the script-loop surfaces. Matches the orchestrator's
- * `scaleScoreOutOf10` so backend + UI agree on the number.
- */
-function scoreOutOf10(passed: number, total: number): number {
-  if (total <= 0) return 0;
-  return Math.max(0, Math.min(10, Math.round((passed * 10) / total)));
-}
-
-/** Threshold below which the script auto-iterates. Mirrors
- *  SCRIPT_LOOP_MIN_SCORE_OUT_OF_10 in orchestrator.ts. */
-const SCRIPT_SCORE_THRESHOLD = 7;
-
-/**
- * Color a 0–10 score the same way the orchestrator decides to ship
- * or iterate: red < 5 (clearly not done), amber 5–6 (close, keep going),
- * emerald >= 7 (good enough — done).
- */
-function scoreToneClass(score: number): string {
-  if (score >= SCRIPT_SCORE_THRESHOLD) {
-    return "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-500/40";
-  }
-  if (score >= 5) {
-    return "bg-amber-100 text-amber-700 ring-1 ring-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/40";
-  }
-  return "bg-rose-100 text-rose-700 ring-1 ring-rose-300 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-500/40";
-}
-
-/**
- * Score badge pinned to the ProgressNode header. Shows the live /10
- * score while the verifier is streaming, the final /10 score after
- * the verdict, and disappears when there's nothing to display (no
- * attempt has been graded yet). Pulses while the score is live so
- * the user can tell at a glance that the loop is still working.
- */
-function HeaderScoreBadge({
-  liveScore,
-  verdict,
-}: {
-  liveScore: {
-    attempt: number;
-    passed: number;
-    total: number;
-    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
-    done: boolean;
-  } | null;
+function StepBody(props: {
+  id: StepId;
+  status: StepStatus;
+  waitingText: string;
+  liveText: string;
+  task: Task | null;
+  plan: PlanSummary | null;
+  diff: DiffSummary | null;
   verdict: Verdict | null;
+  liveScore: LiveScore | null;
+  lastAttempt?: AttemptRecord;
+  escalationReason: string | null;
 }) {
-  // Prefer the live score if present; fall back to the final verdict.
-  const passed = liveScore?.passed ?? (verdict ? verdict.criteriaWalk.filter((c) => c.passed).length : null);
-  const total = liveScore?.total ?? (verdict ? verdict.criteriaWalk.length : null);
-  if (passed === null || total === null || total === 0) return null;
-  const score = scoreOutOf10(passed, total);
-  const isLive = liveScore !== null && !liveScore.done;
-  const isFinal = liveScore?.done === true || (verdict && liveScore === null);
-  return (
-    <span
-      className={cn(
-        "ml-auto inline-flex items-center gap-1 rounded-full px-2 py-px text-[10px] font-semibold tabular-nums",
-        scoreToneClass(score)
-      )}
-      title={
-        isLive
-          ? `Streaming: ${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
-          : `${passed}/${total} criteria pass → ${score}/10 (threshold ${SCRIPT_SCORE_THRESHOLD}/10)`
-      }
-    >
-      {isLive && (
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
-          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
-        </span>
-      )}
-      <span className="font-mono">
-        Score {score}/10
-      </span>
-      {isLive && !isFinal && (
-        <span className="text-[8.5px] font-normal uppercase tracking-wider opacity-70">
-          live
-        </span>
-      )}
-    </span>
-  );
-}
+  const { id, status, plan, diff, verdict, liveScore, task, lastAttempt } = props;
 
-function LiveScoreCard({
-  liveScore,
-}: {
-  liveScore: {
-    attempt: number;
-    passed: number;
-    total: number;
-    partial: Array<{ criterion: string; passed: boolean; evidence: string }>;
-    done: boolean;
-  };
-}) {
-  const failed = liveScore.partial.filter((c) => !c.passed).length;
-  const score = scoreOutOf10(liveScore.passed, liveScore.total);
-  const isFinal = liveScore.done;
-  const aboveThreshold = score >= SCRIPT_SCORE_THRESHOLD;
-  return (
-    <div
-      className={cn(
-        "mt-1 rounded-md border p-1.5",
-        aboveThreshold
-          ? "border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/60 dark:bg-emerald-950/30"
-          : score >= 5
-          ? "border-amber-200 bg-amber-50/60 dark:border-amber-800/60 dark:bg-amber-950/30"
-          : "border-rose-200 bg-rose-50/60 dark:border-rose-800/60 dark:bg-rose-950/30"
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          <span className="relative flex h-1.5 w-1.5">
-            <span
-              className={cn(
-                "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
-                aboveThreshold
-                  ? "bg-emerald-400"
-                  : score >= 5
-                  ? "bg-amber-400"
-                  : "bg-rose-400"
-              )}
-            />
-            <span
-              className={cn(
-                "relative inline-flex h-1.5 w-1.5 rounded-full",
-                aboveThreshold
-                  ? "bg-emerald-500"
-                  : score >= 5
-                  ? "bg-amber-500"
-                  : "bg-rose-500"
-              )}
-            />
-          </span>
-          <span
-            className={cn(
-              "text-[9.5px] font-semibold uppercase tracking-wider",
-              aboveThreshold
-                ? "text-emerald-700 dark:text-emerald-300"
-                : score >= 5
-                ? "text-amber-700 dark:text-amber-300"
-                : "text-rose-700 dark:text-rose-300"
-            )}
-          >
-            {isFinal ? "Final" : "Live"}
-          </span>
-          <span className="text-[9.5px] text-zinc-500 dark:text-zinc-400">
-            attempt {liveScore.attempt}
-          </span>
-        </div>
-        <div className="flex items-baseline gap-1">
-          <span
-            className={cn(
-              "font-mono text-[15px] font-bold tabular-nums",
-              aboveThreshold
-                ? "text-emerald-700 dark:text-emerald-300"
-                : score >= 5
-                ? "text-amber-700 dark:text-amber-300"
-                : "text-rose-700 dark:text-rose-300"
-            )}
-            title={`${liveScore.passed}/${liveScore.total} criteria pass; threshold ${SCRIPT_SCORE_THRESHOLD}/10`}
-          >
-            {score}
-            <span className="text-[10px] font-normal text-zinc-400">/10</span>
-          </span>
-          {!isFinal && !aboveThreshold && (
-            <span className="text-[9px] text-zinc-500 dark:text-zinc-400">
-              need {SCRIPT_SCORE_THRESHOLD - score}
-            </span>
-          )}
-          {isFinal && aboveThreshold && (
-            <span className="text-[9px] font-semibold uppercase text-emerald-700 dark:text-emerald-300">
-              ✓ done
-            </span>
-          )}
-        </div>
+  if (status === "waiting") return <Muted>{props.waitingText}</Muted>;
+  if (status === "active") {
+    return (
+      <>
+        <p className="mt-0.5 text-[11.5px] leading-snug text-violet-600 dark:text-violet-300">{phaseActivityLine(id, task)}</p>
+        {props.liveText && props.liveText !== phaseActivityLine(id, task) && (
+          <p className="mt-0.5 truncate font-mono text-[10.5px] text-zinc-500" title={props.liveText}>
+            {props.liveText}
+          </p>
+        )}
+        {id === "verification" && liveScore && liveScore.partial.length > 0 && (
+          <ul className="mt-1.5">
+            {liveScore.partial.map((c, i) => (
+              <CriterionRow key={i} text={c.criterion} passed={c.passed} evidence={c.evidence} />
+            ))}
+          </ul>
+        )}
+      </>
+    );
+  }
+  // An escalation at the verify step still has a verdict: show what the
+  // verifier actually found (criteria + required fixes) rather than only
+  // the generic reason — the banner below carries the reason.
+  if (status === "error" && !(id === "verification" && verdict)) {
+    return (
+      <div className="mt-1 rounded-md border border-rose-500/30 bg-rose-500/5 px-2 py-1.5 text-[11px] leading-snug text-rose-700 dark:text-rose-300">
+        {cleanReason(props.escalationReason) ?? "The loop stopped here."}
       </div>
-      {liveScore.partial.length > 0 && (
-        <ul className="mt-1 space-y-0.5">
-          {liveScore.partial.map((c, i) => (
-            <li
-              key={i}
-              className="flex items-start gap-1 text-[10px]"
-              title={c.evidence}
-            >
-              <span
-                className="shrink-0 font-mono"
-                style={{ color: c.passed ? "#3fb950" : "#f85149" }}
-              >
-                {c.passed ? "✓" : "✗"}
-              </span>
-              <span
-                className="text-zinc-600 dark:text-zinc-300"
-                style={{
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {c.criterion}
-              </span>
-            </li>
+    );
+  }
+
+  // done
+  if (id === "planning") {
+    if (!plan) return <Muted>Plan ready.</Muted>;
+    return (
+      <>
+        <Muted>
+          Turned the request into {plan.criteria.length} acceptance criteri{plan.criteria.length === 1 ? "on" : "a"} and a{" "}
+          {plan.steps}-step plan.
+        </Muted>
+        {plan.criteria.length > 0 && (
+          <>
+            <Label>Acceptance criteria</Label>
+            <ul>
+              {plan.criteria.map((c, i) => (
+                <CriterionRow key={i} text={c} />
+              ))}
+            </ul>
+          </>
+        )}
+        {plan.filesToTouch.length > 0 && (
+          <>
+            <Label>Allowed to write</Label>
+            <div className="flex flex-wrap gap-1">
+              {plan.filesToTouch.map((f) => (
+                <FileChip key={f} path={f} />
+              ))}
+            </div>
+          </>
+        )}
+      </>
+    );
+  }
+  if (id === "plan_review") {
+    return (
+      <Muted>
+        {task?.autoApprovePlan
+          ? "Auto-approved — this task runs unattended. Writes outside the allowlist are blocked in code."
+          : "Approved by you. Writes outside the allowlist are blocked in code."}
+      </Muted>
+    );
+  }
+  if (id === "implementation") {
+    const files = diff?.filesChanged ?? lastAttempt?.filesChanged ?? [];
+    const hasBuild = diff && diff.buildExit !== null && diff.buildExit !== undefined;
+    const tests = diff ? diff.testsPassed + diff.testsFailed : 0;
+    const rt = lastAttempt?.runtimeResult;
+    return (
+      <>
+        <Muted>
+          Wrote {files.length} file{files.length === 1 ? "" : "s"}
+          {hasBuild ? ` · build ${diff!.buildExit === 0 ? "passed" : `failed (exit ${diff!.buildExit})`}` : ""}
+          {tests > 0 ? ` · tests ${diff!.testsPassed}/${tests}` : ""}
+          {!hasBuild && tests === 0 ? " · static files, no build step" : ""}.
+        </Muted>
+        {files.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {files.map((f) => (
+              <FileChip key={f.path} path={f.path} tone="written" />
+            ))}
+          </div>
+        )}
+        {rt && (
+          <p className="mt-1.5 text-[10.5px] text-zinc-500">
+            Headless browser check:{" "}
+            <span className={rt.passed ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}>
+              {rt.passed ? "page loaded clean" : "errors on load"}
+            </span>{" "}
+            · {rt.consoleErrorCount} console / {rt.pageErrorCount} page errors
+          </p>
+        )}
+      </>
+    );
+  }
+  // verification
+  if (!verdict) return <Muted>Verification done.</Muted>;
+  const passed = verdict.criteriaWalk.filter((c) => c.passed).length;
+  const approved = verdict.outcome === "APPROVE";
+  return (
+    <>
+      <Muted>
+        {approved ? "Approved" : verdict.outcome === "REJECT" ? "Rejected" : "Escalated to a human"} after checking{" "}
+        {verdict.criteriaWalk.length} criteri{verdict.criteriaWalk.length === 1 ? "on" : "a"} — {passed} passed · risk{" "}
+        {verdict.risk.toLowerCase()}.
+      </Muted>
+      {verdict.criteriaWalk.length > 0 && (
+        <ul className="mt-1.5">
+          {verdict.criteriaWalk.map((c, i) => (
+            <CriterionRow key={i} text={c.criterion} passed={c.passed} evidence={c.evidence} />
           ))}
         </ul>
       )}
-      {failed > 0 && !isFinal && (
-        <p className="mt-1 text-[9px] text-zinc-500 dark:text-zinc-400">
-          {failed} failing · loop will auto-iterate when below {SCRIPT_SCORE_THRESHOLD}/10
-        </p>
+      {!approved && verdict.requiredFixes.length > 0 && (
+        <>
+          <Label>Required fixes</Label>
+          <ul className="space-y-0.5">
+            {verdict.requiredFixes.map((f, i) => (
+              <li key={i} className="text-[11px] leading-snug text-amber-700 dark:text-amber-300">
+                {i + 1}. {f}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
+    </>
+  );
+}
+
+function ResultBanner({
+  phase,
+  task,
+  verdict,
+  escalationReason,
+}: {
+  phase: TaskStatus;
+  task: Task | null;
+  verdict: Verdict | null;
+  escalationReason: string | null;
+}) {
+  const attempt = task?.attempt ?? 1;
+  const max = task?.maxAttempts ?? 3;
+  if (phase === "done") {
+    const total = verdict?.criteriaWalk.length ?? 0;
+    const passed = verdict?.criteriaWalk.filter((c) => c.passed).length ?? 0;
+    return (
+      <div className="mb-2 mt-1 flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
+        <ShieldCheck size={15} className="mt-0.5 shrink-0 text-emerald-500" />
+        <div className="text-[11.5px] leading-snug">
+          <div className="font-semibold text-emerald-700 dark:text-emerald-300">
+            Approved on attempt {attempt} of {max}
+          </div>
+          <div className="text-zinc-500 dark:text-zinc-400">
+            {total > 0 ? `${passed}/${total} criteria verified by an independent verifier.` : "Verified by an independent verifier."}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-2 mt-1 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/5 px-3 py-2">
+      <AlertTriangle size={15} className="mt-0.5 shrink-0 text-rose-500" />
+      <div className="text-[11.5px] leading-snug">
+        <div className="font-semibold text-rose-700 dark:text-rose-300">Needs a human — stopped after attempt {attempt} of {max}</div>
+        <div className="text-zinc-500 dark:text-zinc-400">{cleanReason(escalationReason) ?? "The loop could not converge."}</div>
+      </div>
     </div>
   );
 }
 
-function FinalState({
-  phase,
-  doneSummary,
-  escalationReason,
-}: {
-  phase: TaskStatus | null;
-  doneSummary: string | null;
-  escalationReason: string | null;
-}) {
-  if (phase === "done") {
-    return (
-      <div className="flex items-start gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-300">
-        <CheckCircle2 size={11} className="mt-0.5 shrink-0" />
-        <div>
-          <p className="font-semibold">Task complete</p>
-          {doneSummary && (
-            <p className="mt-0.5 text-[10.5px] text-zinc-500 dark:text-zinc-400">
-              {doneSummary}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-  if (phase === "escalated") {
-    return (
-      <div className="flex items-start gap-1.5 text-[11px] text-rose-700 dark:text-rose-300">
-        <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-        <div>
-          <p className="font-semibold">Escalated</p>
-          {escalationReason && (
-            <p className="mt-0.5 line-clamp-3 text-[10.5px] text-zinc-500 dark:text-zinc-400">
-              {escalationReason}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-  return null;
-}
-
-function isActiveTaskStatus(status: TaskStatus | null): boolean {
+function StatusChip({ phase, running }: { phase: TaskStatus | null; running: boolean }) {
+  const label =
+    phase === "done" ? "Done"
+    : phase === "escalated" ? "Escalated"
+    : phase === "cancelled" ? "Cancelled"
+    : phase === "planning" ? "Planning"
+    : phase === "plan_review" ? "Review"
+    : phase === "implementing" ? "Implementing"
+    : phase === "verifying" ? "Verifying"
+    : running ? "Running" : "Idle";
+  const tone =
+    phase === "done"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+      : phase === "escalated"
+      ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+      : running
+      ? "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300"
+      : "border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400";
   return (
-    status === "planning" ||
-    status === "plan_review" ||
-    status === "implementing" ||
-    status === "verifying"
+    <span className={cn("flex h-6 shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] font-semibold uppercase tracking-wider", tone)}>
+      {phase === "done" ? <Check size={11} strokeWidth={3} /> : phase === "escalated" ? <AlertTriangle size={10} /> : running ? <Loader2 size={10} className="animate-spin" /> : null}
+      {label}
+    </span>
   );
 }
 
-function phaseActivityLine(stepId: string, task: Task | null): string {
-  switch (stepId) {
+function ScoreChip({ liveScore, verdict }: { liveScore: LiveScore | null; verdict: Verdict | null }) {
+  const passed = liveScore?.passed ?? (verdict ? verdict.criteriaWalk.filter((c) => c.passed).length : null);
+  const total = liveScore?.total ?? (verdict ? verdict.criteriaWalk.length : null);
+  if (passed === null || total === null || total === 0) return null;
+  const score = Math.max(0, Math.min(10, Math.round((passed * 10) / total)));
+  const live = liveScore !== null && !liveScore.done;
+  const tone =
+    score >= 7
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+      : score >= 5
+      ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+      : "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300";
+  return (
+    <span
+      className={cn("flex h-6 shrink-0 items-center gap-1 rounded-md border px-2 font-mono text-[10.5px] font-semibold tabular-nums", tone)}
+      title={`${passed}/${total} criteria pass`}
+    >
+      {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
+      {score}/10
+    </span>
+  );
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────
+
+function isActiveTaskStatus(status: TaskStatus | null): boolean {
+  return status === "planning" || status === "plan_review" || status === "implementing" || status === "verifying";
+}
+
+function phaseActivityLine(id: StepId, task: Task | null): string {
+  switch (id) {
     case "planning":
-      return "Planner is writing the plan.";
+      return "Writing acceptance criteria and the file allowlist…";
     case "plan_review":
-      return "Plan is waiting for your confirmation.";
-    case "implementation": {
-      const attempt = Math.max(1, task?.attempt ?? 0);
-      const max = task?.maxAttempts ?? 3;
-      return `Maker is writing files (attempt ${attempt} of ${max}).`;
-    }
+      return "Waiting for your go-ahead on the plan.";
+    case "implementation":
+      return `Maker is writing files — attempt ${Math.max(1, task?.attempt ?? 0)} of ${task?.maxAttempts ?? 3}…`;
     case "verification":
-      return "Verifier is checking the work independently.";
-    default:
-      return "Loop is making progress.";
+      return "Independent verifier is checking each criterion…";
   }
 }
 
-function phaseAgentFor(stepId: string): LogEntry["agent"] | null {
-  if (stepId === "planning") return "planner";
-  if (stepId === "plan_review") return "orchestrator";
-  if (stepId === "implementation") return "maker";
-  if (stepId === "verification") return "verifier";
-  return null;
+function phaseAgentFor(id: StepId): LogEntry["agent"] | null {
+  if (id === "planning") return "planner";
+  if (id === "plan_review") return "orchestrator";
+  if (id === "implementation") return "maker";
+  return "verifier";
+}
+
+function shortModel(model?: string): string | null {
+  if (!model) return null;
+  // custom:<connId>:<upstream> → upstream
+  const parts = model.split(":");
+  return parts.length >= 3 && parts[0] === "custom" ? parts.slice(2).join(":") : model;
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  return `${m}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+/** Escalation reasons carry an artifact-path tail meant for logs, not the card. */
+function cleanReason(reason: string | null): string | null {
+  if (!reason) return null;
+  return reason.replace(/\s+—\s+raw LLM outputs.*$/s, "").trim();
 }
 
 function truncate(s: string, n: number) {
-  if (!s) return s;
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
-
-// Keep imports used so tree-shaking doesn't drop them if a future
-// refactor wants them. Circle and CircleDashed are referenced in
-// alternative visual styles we may want later.
-void Circle;
-void CircleDashed;
-void ArrowLeft;
 
 export const ProgressNode = memo(ProgressNodeImpl);
