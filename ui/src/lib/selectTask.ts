@@ -21,6 +21,10 @@ export async function selectTask(
     const { task } = (await res.json()) as { task: Task };
     if (mine !== latestSelect) return;
     loadTask(task);
+    // Paint the canvas from the task's persisted status immediately. A task
+    // parked in plan_review (or a finished task) may not emit another live
+    // phase event after it is selected.
+    useWorkflow.getState().applyTaskStatusToNodes(task.status, task.attempt);
     subscribe(task.id);
   } catch (e) {
     console.error("[selectTask] failed to load task", id, e);
@@ -29,11 +33,14 @@ export async function selectTask(
 
 export function useSelectTask(): (id: string) => void {
   const loadTask = useWorkflow((s) => s.loadTask);
+  const setFollowLive = useWorkflow((s) => s.setFollowLive);
   const { subscribe } = useLoopSocket();
   return useCallback(
     (id: string) => {
+      // A deliberate sidebar click is an opt-out from automatic following.
+      setFollowLive(false);
       void selectTask(id, loadTask, subscribe);
     },
-    [loadTask, subscribe]
+    [loadTask, setFollowLive, subscribe]
   );
 }

@@ -27,6 +27,7 @@ import type {
   DiffSummary,
   LogEntry,
   PlanSummary,
+  Task,
   TaskStatus,
   Verdict,
 } from "@/types/loop";
@@ -116,17 +117,29 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
   const isRunning = useWorkflow((s) => s.isRunning);
   const logs = useWorkflow((s) => s.logs);
 
+  // A freshly loaded task already carries its persisted status, while the
+  // first live phase event may still be in flight. Prefer that status so the
+  // node never renders an empty/idle state during the handoff.
+  const effectivePhase = phase ?? task?.status ?? null;
+  const effectiveIsRunning = isRunning || isActiveTaskStatus(effectivePhase);
+  const effectiveEscalationReason =
+    escalationReason ?? task?.escalationReason ?? null;
+  const effectiveDoneSummary =
+    doneSummary ?? task?.verdict?.oneLineReason ?? null;
+
   // Map backend phase → active step id. We collapse "done" and
   // "escalated" to verification so the last step lights up.
   const activeStep = useMemo(() => {
-    if (!phase || phase === "draft" || phase === "cancelled") return null;
-    if (phase === "done" || phase === "escalated") return "verification";
-    return phase;
-  }, [phase]);
+    if (!effectivePhase || effectivePhase === "draft" || effectivePhase === "cancelled") return null;
+    if (effectivePhase === "done" || effectivePhase === "escalated") return "verification";
+    if (effectivePhase === "implementing") return "implementation";
+    if (effectivePhase === "verifying") return "verification";
+    return effectivePhase;
+  }, [effectivePhase]);
 
   const stepStatus = (stepId: string): StepStatus => {
-    if (phase === "done") return "done";
-    if (phase === "escalated") {
+    if (effectivePhase === "done") return "done";
+    if (effectivePhase === "escalated") {
       const order = STEPS.map((s) => s.id);
       const thisIdx = order.indexOf(stepId);
       const escIdx = order.indexOf("verification");
@@ -178,7 +191,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
       ? [...logs].reverse().find((l) => l.agent === phaseAgent)
       : undefined;
     const text = recentForPhase?.text ?? latestLog?.text;
-    if (!text) return "In progress…";
+    if (!text) return phaseActivityLine(stepId, task);
     return truncate(text.replace(/\s+/g, " ").trim(), 120);
   }
 
@@ -190,7 +203,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
   function stepSummary(stepId: string, status: StepStatus): string {
     if (status === "waiting") return "Waiting for earlier steps to finish.";
     if (status === "error") {
-      return escalationReason ?? "Failed.";
+      return effectiveEscalationReason ?? "Failed.";
     }
     if (status === "active") {
       // Active step summary — "Doing now: <latest log>". When the most
@@ -200,14 +213,12 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
       // (1/3, 2/3) — the planner is the phase that goes through
       // re-prompts most often, and the user has no other way to see
       // that progress.
-      const baseText = `Doing now: ${activeLiveText(stepId)}`;
+      const activity = phaseActivityLine(stepId, task);
+      const liveDetail = activeLiveText(stepId);
+      const parts: string[] = [activity];
+      if (liveDetail !== activity) parts.push(`Doing now: ${liveDetail}`);
       const ms = latestLatencyMsForStep(stepId);
-      const parts: string[] = [baseText];
       if (ms !== null) parts.push(`last call ${formatLatency(ms)}`);
-      if (stepId === "planning" && task && task.attempt > 0) {
-        const max = task.maxAttempts ?? 3;
-        parts.push(`attempt ${task.attempt + 1}/${max}`);
-      }
       return parts.join(" · ");
     }
     // status === "done"
@@ -234,14 +245,15 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
           : "escalated";
       const vTotal = verdict.testsPassed + verdict.testsFailed;
       const tests = vTotal === 0 ? "n/a" : `${verdict.testsPassed}/${vTotal}`;
-      return `Verifier ${outcome} the change (tests ${tests}, risk ${verdict.risk}).`;
+      const reason = verdict.oneLineReason ? ` — ${truncate(verdict.oneLineReason, 92)}` : "";
+      return `Verifier ${outcome} the change (tests ${tests}, risk ${verdict.risk})${reason}.`;
     }
     return "";
   }
 
   const headerLabel = task?.title ?? "Loop progress";
   const headerStatus: string = useMemo(() => {
-    switch (phase) {
+    switch (effectivePhase) {
       case "done":
         return "Complete";
       case "escalated":
@@ -257,9 +269,9 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
       case "verifying":
         return "Verifying";
       default:
-        return isRunning ? "Running" : "Idle";
+        return effectiveIsRunning ? "Running" : "Idle";
     }
-  }, [phase, isRunning]);
+  }, [effectivePhase, effectiveIsRunning]);
 
   /**
    * Same React Flow interaction-escape pattern as the chatbot node —
@@ -329,11 +341,11 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
         <span
           className={cn(
             "ml-1 rounded-full px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider",
-            phase === "done"
+            effectivePhase === "done"
               ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-              : phase === "escalated"
+              : effectivePhase === "escalated"
               ? "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300"
-              : isRunning
+              : effectiveIsRunning
               ? "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
               : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
           )}
@@ -433,7 +445,7 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
                       diff={diff}
                       verdict={verdict}
                       liveScore={liveScore}
-                      escalationReason={escalationReason}
+                      escalationReason={effectiveEscalationReason}
                     />
                   )}
                 </div>
@@ -443,17 +455,17 @@ function ProgressNodeImpl({ data, selected }: NodeProps) {
         })}
 
         {/* Terminal state footer — done or escalated. */}
-        {(phase === "done" || phase === "escalated") && (
+        {(effectivePhase === "done" || effectivePhase === "escalated") && (
           <div className="mt-1 border-t border-zinc-100 px-1.5 py-2 dark:border-zinc-800">
             <FinalState
-              phase={phase}
-              doneSummary={doneSummary}
-              escalationReason={escalationReason}
+              phase={effectivePhase}
+              doneSummary={effectiveDoneSummary}
+              escalationReason={effectiveEscalationReason}
             />
           </div>
         )}
 
-        {!phase && (
+        {!effectivePhase && (
           <p className="px-3 py-6 text-center text-[11px] text-zinc-400">
             No task running. Start one from the chatbot.
           </p>
@@ -926,6 +938,33 @@ function FinalState({
     );
   }
   return null;
+}
+
+function isActiveTaskStatus(status: TaskStatus | null): boolean {
+  return (
+    status === "planning" ||
+    status === "plan_review" ||
+    status === "implementing" ||
+    status === "verifying"
+  );
+}
+
+function phaseActivityLine(stepId: string, task: Task | null): string {
+  switch (stepId) {
+    case "planning":
+      return "Planner is writing the plan.";
+    case "plan_review":
+      return "Plan is waiting for your confirmation.";
+    case "implementation": {
+      const attempt = Math.max(1, task?.attempt ?? 0);
+      const max = task?.maxAttempts ?? 3;
+      return `Maker is writing files (attempt ${attempt} of ${max}).`;
+    }
+    case "verification":
+      return "Verifier is checking the work independently.";
+    default:
+      return "Loop is making progress.";
+  }
 }
 
 function phaseAgentFor(stepId: string): LogEntry["agent"] | null {

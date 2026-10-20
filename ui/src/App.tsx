@@ -14,6 +14,7 @@ import { NewTaskModal } from "@/components/NewTaskModal";
 import { ChatbotLab } from "@/pages/ChatbotLab";
 import { BatchPanel } from "@/components/batch/BatchPanel";
 import { selectTask } from "@/lib/selectTask";
+import { useFollowActiveTask } from "@/lib/useFollowActiveTask";
 
 export default function App() {
   // Dev-only escape hatch: /chatbot-lab renders the lab page instead of
@@ -29,9 +30,13 @@ export default function App() {
   // "connections" → ConnectionsPanel replaces Canvas
   const [activeView, setActiveView] = useState<SidebarView>("workflow");
   const { subscribe } = useLoopSocket();
+  // Mounted once at the app root so every view follows the same active loop
+  // and batch updates can trigger an immediate active-task refresh.
+  useFollowActiveTask({ subscribe });
   const isRunning = useWorkflow((s) => s.isRunning);
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
   const setCurrentTask = useWorkflow((s) => s.setCurrentTask);
+  const setFollowLive = useWorkflow((s) => s.setFollowLive);
   const resetNodeStatuses = useWorkflow((s) => s.resetNodeStatuses);
   const taskMirror = useWorkflow((s) => s.taskMirror);
   const loadTask = useWorkflow((s) => s.loadTask);
@@ -111,9 +116,11 @@ export default function App() {
     (taskId: string) => {
       setShowBatch(false);
       setActiveView("workflow");
+      // A deliberate batch-item click opts out of automatic following.
+      setFollowLive(false);
       void selectTask(taskId, loadTask, subscribe);
     },
-    [loadTask, subscribe]
+    [loadTask, setFollowLive, subscribe]
   );
 
   return (

@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { useWorkflow } from "@/lib/store";
 import { useConnectionList } from "@/lib/useConnectionList";
+import { useBatchStore } from "@/lib/batchStore";
 import { cn } from "@/lib/utils";
 import { dynamicModelOptions } from "@/types/loop";
 import type { TaskStatus } from "@/types/loop";
@@ -43,6 +44,10 @@ export function TopBar({ onToggleSidebar, onNewTask, onOpenBatch }: TopBarProps)
   const phase = useWorkflow((s) => s.phase);
   const isRunning = useWorkflow((s) => s.isRunning);
   const currentTaskId = useWorkflow((s) => s.currentTaskId);
+  const activeTask = useWorkflow((s) => s.activeTask);
+  const followLive = useWorkflow((s) => s.followLive);
+  const toggleFollowLive = useWorkflow((s) => s.toggleFollowLive);
+  const batches = useBatchStore((s) => s.batches);
   const wsStatus = useWorkflow((s) => s.wsStatus);
   // Live + final score for the top-bar badge. Mirrors the same data the
   // ProgressNode's HeaderScoreBadge reads from, so the two stay in sync
@@ -51,6 +56,16 @@ export function TopBar({ onToggleSidebar, onNewTask, onOpenBatch }: TopBarProps)
   // mounted.
   const liveScore = useWorkflow((s) => s.liveScore);
   const verdict = useWorkflow((s) => s.verdict);
+
+  const liveTask = activeTask ?? (isRunning && taskMirror ? taskMirror : null);
+  const liveStatus = liveTask?.status ?? null;
+  const livePhase =
+    liveTask && liveTask.id === currentTaskId
+      ? phase ?? liveTask.status
+      : liveStatus;
+  const liveBatchPosition = liveTask
+    ? findBatchPosition(liveTask.id, liveTask.batchId, batches)
+    : null;
 
   const handleStop = () => {
     // Stop is destructive — fire an event that App picks up and shows a
@@ -160,6 +175,14 @@ export function TopBar({ onToggleSidebar, onNewTask, onOpenBatch }: TopBarProps)
         </span>
       </div>
 
+      <LiveLoopChip
+        followLive={followLive}
+        liveTask={liveTask}
+        livePhase={livePhase}
+        batchPosition={liveBatchPosition}
+        onToggle={toggleFollowLive}
+      />
+
       {/* Task title + phase badge + attempt counter */}
       <div className="ml-2 flex min-w-0 items-center gap-2">
         {taskMirror ? (
@@ -263,6 +286,125 @@ export function TopBar({ onToggleSidebar, onNewTask, onOpenBatch }: TopBarProps)
       </div>
     </header>
   );
+}
+
+type LiveTaskLike = {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  batchId?: string;
+};
+
+function LiveLoopChip({
+  followLive,
+  liveTask,
+  livePhase,
+  batchPosition,
+  onToggle,
+}: {
+  followLive: boolean;
+  liveTask: LiveTaskLike | null;
+  livePhase: TaskStatus | null;
+  batchPosition: { index: number; total: number } | null;
+  onToggle: () => void;
+}) {
+  const running = isActiveTaskStatus(liveTask?.status);
+
+  if (!running) {
+    return (
+      <button
+        type="button"
+        data-testid="follow-live-chip"
+        onClick={onToggle}
+        aria-label="Follow live status: idle"
+        title="No task is running"
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500 transition-colors hover:border-violet-300 hover:text-violet-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-violet-500/50 dark:hover:text-violet-300"
+      >
+        Idle
+      </button>
+    );
+  }
+
+  if (!followLive) {
+    return (
+      <button
+        type="button"
+        data-testid="follow-live-chip"
+        onClick={onToggle}
+        aria-label="Follow live"
+        title="Follow the currently active task"
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-violet-700 transition-colors hover:border-violet-400 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300 dark:hover:border-violet-400/60 dark:hover:bg-violet-500/15"
+      >
+        Follow live
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      data-testid="follow-live-chip"
+      onClick={onToggle}
+      aria-label="Turn off Follow live"
+      title="Stop following the active task"
+      className="flex h-7 min-w-0 max-w-[360px] shrink-0 items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 text-[10.5px] font-semibold text-emerald-700 transition-colors hover:border-emerald-400 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:border-emerald-400/60 dark:hover:bg-emerald-500/15"
+    >
+      <span className="relative flex h-1.5 w-1.5 shrink-0" aria-hidden>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-70" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+      </span>
+      <span className="shrink-0 uppercase tracking-wider">LIVE</span>
+      <span className="truncate font-medium normal-case tracking-normal">
+        — {liveTask?.title ?? "active task"} — {livePhase ? phaseLabel(livePhase) : "active"}
+      </span>
+      {batchPosition && (
+        <span className="shrink-0 border-l border-emerald-300/70 pl-1.5 font-mono text-[9.5px] dark:border-emerald-500/40">
+          batch item {batchPosition.index} of {batchPosition.total}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function isActiveTaskStatus(status: TaskStatus | undefined): boolean {
+  return (
+    status === "planning" ||
+    status === "plan_review" ||
+    status === "implementing" ||
+    status === "verifying"
+  );
+}
+
+function phaseLabel(phase: TaskStatus): string {
+  switch (phase) {
+    case "plan_review":
+      return "Plan review";
+    case "planning":
+      return "Planning";
+    case "implementing":
+      return "Implementing";
+    case "verifying":
+      return "Verifying";
+    case "draft":
+      return "Draft";
+    case "done":
+      return "Done";
+    case "escalated":
+      return "Escalated";
+    case "cancelled":
+      return "Cancelled";
+  }
+}
+
+function findBatchPosition(
+  taskId: string,
+  batchId: string | undefined,
+  batches: Array<{ id: string; items: Array<{ index: number; taskId?: string }> }>
+): { index: number; total: number } | null {
+  if (!batchId) return null;
+  const batch = batches.find((candidate) => candidate.id === batchId);
+  const item = batch?.items.find((candidate) => candidate.taskId === taskId);
+  return item && batch ? { index: item.index + 1, total: batch.items.length } : null;
 }
 
 /**

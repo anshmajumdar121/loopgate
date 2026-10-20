@@ -56,6 +56,24 @@ tasksApi.get("/tasks", (c) => {
   return c.json({ tasks: listTasks().map(toTaskSummary) });
 });
 
+// Current loop owner — keep this before /tasks/:id so "active" is not
+// interpreted as a task id.
+tasksApi.get("/tasks/active", (c) => {
+  const active = getActiveTask();
+  if (!active) return c.json({ task: null });
+
+  const phase = active.history.at(-1)?.phase;
+  return c.json({
+    task: {
+      id: active.id,
+      status: active.status,
+      title: active.title,
+      ...(active.batchId ? { batchId: active.batchId } : {}),
+      ...(phase ? { phase } : {}),
+    },
+  });
+});
+
 /**
  * Gap #1 (2026-07-12-snake-run-diagnosis): fail task creation LOUDLY when
  * no role can resolve to a usable connection, instead of letting the

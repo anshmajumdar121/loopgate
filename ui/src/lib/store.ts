@@ -23,6 +23,7 @@ import {
 import { DEFAULT_MODEL_ID } from "@/types/loop";
 import type {
   Task,
+  TaskSummary,
   TaskStatus,
   LogEntry,
   PlanSummary,
@@ -31,6 +32,7 @@ import type {
 } from "@/types/loop";
 
 type Theme = "light" | "dark";
+const FOLLOW_LIVE_STORAGE_KEY = "followLive";
 
 /** Phases where the orchestrator is actively driving the task. */
 const ACTIVE_PHASES: readonly TaskStatus[] = [
@@ -51,6 +53,11 @@ interface WorkflowState {
   // Real backend task mirror
   currentTaskId: string | null;
   taskMirror: Task | null;
+  /** Server mirror of the task currently driving the loop, independent of
+   * which task the user has chosen to inspect. */
+  activeTask: TaskSummary | null;
+  /** Whether the UI should automatically follow the server's active task. */
+  followLive: boolean;
   phase: TaskStatus | null;
   isRunning: boolean;
   plan: PlanSummary | null;
@@ -110,6 +117,9 @@ interface WorkflowState {
 
   // backend task lifecycle
   setCurrentTask: (id: string | null) => void;
+  setActiveTask: (task: TaskSummary | null) => void;
+  setFollowLive: (follow: boolean) => void;
+  toggleFollowLive: () => void;
   loadTask: (task: Task) => void;
   setTaskMirror: (t: Task) => void;
   setPhase: (from: TaskStatus, to: TaskStatus) => void;
@@ -207,6 +217,8 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   // Backend mirror
   currentTaskId: null,
   taskMirror: null,
+  activeTask: null,
+  followLive: loadFollowLiveFromStorage(),
   phase: null,
   isRunning: false,
   plan: null,
@@ -328,10 +340,12 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       escalationReason: task.escalationReason ?? null,
       doneSummary:
         status === "done"
-          ? `Task approved on attempt ${task.attempt}.`
+          ? task.verdict?.oneLineReason ?? `Task approved on attempt ${task.attempt}.`
           : null,
       errorMessage: null,
-      logs: [],
+      // The full-task endpoint includes persisted log history. Keep it when
+      // selecting a task so live appends continue from the right context.
+      logs: task.logs ?? [],
       awaitingConfirmation: status === "plan_review",
       awaitingFeedback:
         status === "verifying" && task.verdict?.outcome === "REJECT",
@@ -358,6 +372,19 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
           : n
       ),
     });
+  },
+  setActiveTask: (task) => set({ activeTask: task }),
+  setFollowLive: (follow) => {
+    try {
+      localStorage.setItem(FOLLOW_LIVE_STORAGE_KEY, String(follow));
+    } catch {
+      /* storage unavailable — in-memory state still works */
+    }
+    set({ followLive: follow });
+  },
+  toggleFollowLive: () => {
+    const next = !get().followLive;
+    get().setFollowLive(next);
   },
   setPhase: (_from, to) => set({ phase: to }),
   appendLog: (entry) =>
@@ -570,6 +597,16 @@ if (typeof document !== "undefined") {
 // ─── Persisted per-group model config ─────────────────────────────────
 // Loaded synchronously at module init so the store starts with the user's
 // previous picks rather than defaults.
+function loadFollowLiveFromStorage(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = localStorage.getItem(FOLLOW_LIVE_STORAGE_KEY);
+    return raw === null ? true : raw !== "false";
+  } catch {
+    return true;
+  }
+}
+
 function loadNodeModelsFromStorage(): Record<NodeGroupId, string> {
   const defaults: Record<NodeGroupId, string> = {
     planning: DEFAULT_MODEL_ID,

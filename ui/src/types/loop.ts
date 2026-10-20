@@ -116,6 +116,8 @@ export interface Task {
    *  user gate and proceeds straight to implementation. Mirrors
    *  backend/src/types.ts Task.autoApprovePlan. */
   autoApprovePlan?: boolean;
+  /** Batch this task belongs to (Map node item), if any. */
+  batchId?: string;
   /** Optional project + session this task belongs to. Tasks without
    *  these stay in the "Unassigned" bucket and never appear inside any
    *  Project > Session tree. */
@@ -146,6 +148,7 @@ export type TaskSummary = Pick<
   | "createdAt"
   | "updatedAt"
   | "model"
+  | "batchId"
   | "escalationReason"
   | "previewUrl"
   | "projectId"

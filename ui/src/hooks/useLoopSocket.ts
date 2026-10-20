@@ -65,6 +65,11 @@ export function useLoopSocket() {
         case "batch_update": {
           // Not task-scoped — every client mirrors every batch.
           if (msg.batch) useBatchStore.getState().upsertBatch(msg.batch);
+          // Batch items create their task server-side. Let the active-task
+          // follower poll immediately instead of waiting for its next tick.
+          window.dispatchEvent(
+            new CustomEvent("loop:batch-update", { detail: msg })
+          );
           break;
         }
 
