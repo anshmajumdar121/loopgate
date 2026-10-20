@@ -140,7 +140,11 @@ function ItemRow({
           <div
             className={cn(
               "mt-0.5 line-clamp-2 text-[11px]",
-              item.status === "failed" ? "text-rose-600 dark:text-rose-400" : "text-amber-700 dark:text-amber-400"
+              item.status === "done"
+                ? "text-emerald-700 dark:text-emerald-400"
+                : item.status === "failed"
+                ? "text-rose-600 dark:text-rose-400"
+                : "text-amber-700 dark:text-amber-400"
             )}
             title={item.reason}
           >

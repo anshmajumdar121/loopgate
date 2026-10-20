@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "demo:trust": "node scripts/demo/trust-demo.mjs",
-    "demo:fake-llm": "node scripts/demo/fake-llm.mjs"
+    "demo:fake-llm": "node scripts/demo/fake-llm.mjs",
+    "demo:stack": "node scripts/demo/demo-stack.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.3.22",

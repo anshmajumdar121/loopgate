@@ -7,8 +7,8 @@ import type { TaskSummary } from "@/types/loop";
  * sidebar's "Tasks" section.
  *
  * Returns row-sized summaries only; open a task with `useSelectTask`.
- * No caching layer — re-fetches on mount and after `refresh()` calls. A polling interval or
- * SSE-based push would be the next step if list size grows.
+ * No caching layer — re-fetches on mount, after `refresh()` calls, and every
+ * 5s while the tab is visible (batch items create tasks server-side).
  */
 export function useTaskList() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
@@ -31,6 +31,12 @@ export function useTaskList() {
 
   useEffect(() => {
     void refresh();
+    // Tasks are also created server-side (batch items), so poll lightly
+    // while the tab is visible instead of relying on local create events.
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 5000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   return { tasks, loading, error, refresh };

@@ -1,6 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+// Backend the dev proxy talks to. Defaults to the normal dev backend; the
+// offline demo stack (backend/scripts/demo/demo-stack.mjs) points it at an
+// isolated instance.
+const BACKEND_HTTP = process.env.LOOP_BACKEND_URL || "http://localhost:3001";
+const BACKEND_WS = BACKEND_HTTP.replace(/^http/, "ws");
 export default defineConfig({
     plugins: [react()],
     resolve: {
@@ -25,16 +30,16 @@ export default defineConfig({
         ],
         proxy: {
             "/api": {
-                target: "http://localhost:3001",
+                target: BACKEND_HTTP,
                 changeOrigin: true,
             },
             "/ws": {
-                target: "ws://localhost:3001",
+                target: BACKEND_WS,
                 ws: true,
                 changeOrigin: true,
             },
             "/health": {
-                target: "http://localhost:3001",
+                target: BACKEND_HTTP,
                 changeOrigin: true,
             },
         },
