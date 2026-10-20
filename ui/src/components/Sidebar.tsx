@@ -20,6 +20,7 @@ import {
   Layers,
   X,
   Sparkles,
+  Boxes,
 } from "lucide-react";
 import { useTaskList } from "@/lib/useTaskList";
 import { useProjectList, useSessionList } from "@/lib/useProjectTree";
@@ -28,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { NewProjectModal } from "@/components/NewProjectModal";
 import type { Project, Session, TaskSummary, TaskStatus } from "@/types/loop";
 import { useSelectTask } from "@/lib/selectTask";
+import { isBatchActive, useBatchStore } from "@/lib/batchStore";
 
 export type SidebarView = "workflow" | "connections" | "improve";
 
@@ -37,10 +39,14 @@ interface SidebarProps {
    *  in the primary nav. */
   activeView: SidebarView;
   onNavigate: (view: SidebarView) => void;
+  /** Opens the Batch drawer (rendered by App over the current view). */
+  onOpenBatch?: () => void;
+  batchOpen?: boolean;
 }
 
-export function Sidebar({ onNewTask, activeView, onNavigate }: SidebarProps) {
+export function Sidebar({ onNewTask, activeView, onNavigate, onOpenBatch, batchOpen }: SidebarProps) {
   const [showNewProject, setShowNewProject] = useState(false);
+  const batchRunning = useBatchStore((s) => s.batches.some(isBatchActive));
 
   return (
     <aside className="flex h-full w-[268px] flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
@@ -86,6 +92,15 @@ export function Sidebar({ onNewTask, activeView, onNavigate }: SidebarProps) {
           active={activeView === "improve"}
           onClick={() => onNavigate("improve")}
         />
+        {onOpenBatch && (
+          <NavItem
+            icon={Boxes}
+            label="Batch"
+            active={batchOpen}
+            onClick={onOpenBatch}
+            dot={batchRunning}
+          />
+        )}
         <NavItem icon={Settings} label="Settings" disabled />
       </nav>
 
@@ -799,12 +814,15 @@ function NavItem({
   active,
   onClick,
   disabled,
+  dot,
 }: {
   icon: React.ElementType;
   label: string;
   active?: boolean;
   onClick?: () => void;
   disabled?: boolean;
+  /** Small pulsing indicator (e.g. a batch is running). */
+  dot?: boolean;
 }) {
   return (
     <button
@@ -827,6 +845,12 @@ function NavItem({
         }
       />
       <span>{label}</span>
+      {dot && (
+        <span
+          className="ml-auto h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500"
+          aria-label="running"
+        />
+      )}
     </button>
   );
 }

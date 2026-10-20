@@ -292,7 +292,9 @@ export type WsServerMessage =
   | { type: "task_deleted"; taskId: string }
   // Not task-scoped: fired whenever a connection's automated health check
   // changes status. The Connections panel refreshes its list on receipt.
-  | { type: "connection_health"; connectionId: string; health: ConnectionHealth };
+  | { type: "connection_health"; connectionId: string; health: ConnectionHealth }
+  // Not task-scoped: broadcast to all clients whenever a batch changes.
+  | { type: "batch_update"; batchId: string; batch: import("./batch").Batch };
 
 export interface CreateTaskBody {
   prompt: string;

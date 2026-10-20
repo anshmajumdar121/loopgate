@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useWorkflow } from "@/lib/store";
+import { useBatchStore } from "@/lib/batchStore";
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -58,6 +59,12 @@ export function useLoopSocket() {
           window.dispatchEvent(
             new CustomEvent("loop:connection-health", { detail: msg })
           );
+          break;
+        }
+
+        case "batch_update": {
+          // Not task-scoped — every client mirrors every batch.
+          if (msg.batch) useBatchStore.getState().upsertBatch(msg.batch);
           break;
         }
 

@@ -12,6 +12,8 @@ import { useWorkflow } from "@/lib/store";
 import { useTaskList } from "@/lib/useTaskList";
 import { NewTaskModal } from "@/components/NewTaskModal";
 import { ChatbotLab } from "@/pages/ChatbotLab";
+import { BatchPanel } from "@/components/batch/BatchPanel";
+import { selectTask } from "@/lib/selectTask";
 
 export default function App() {
   // Dev-only escape hatch: /chatbot-lab renders the lab page instead of
@@ -22,6 +24,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showNewTask, setShowNewTask] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [showBatch, setShowBatch] = useState(false);
   // "workflow" → Canvas + NodeConfigPanel (default)
   // "connections" → ConnectionsPanel replaces Canvas
   const [activeView, setActiveView] = useState<SidebarView>("workflow");
@@ -31,6 +34,7 @@ export default function App() {
   const setCurrentTask = useWorkflow((s) => s.setCurrentTask);
   const resetNodeStatuses = useWorkflow((s) => s.resetNodeStatuses);
   const taskMirror = useWorkflow((s) => s.taskMirror);
+  const loadTask = useWorkflow((s) => s.loadTask);
   const { refresh: refreshTasks } = useTaskList();
 
   // Stop is destructive. Both the TopBar and the canvas-level RunButton
@@ -101,11 +105,23 @@ export default function App() {
     void refreshTasks();
   };
 
+  // Clicking a batch item jumps to its task on the canvas. Uses App's own
+  // socket handle (not useSelectTask) so the drawer never owns a socket.
+  const handleSelectBatchTask = useCallback(
+    (taskId: string) => {
+      setShowBatch(false);
+      setActiveView("workflow");
+      void selectTask(taskId, loadTask, subscribe);
+    },
+    [loadTask, subscribe]
+  );
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-white text-zinc-900 transition-colors duration-200 dark:bg-zinc-950 dark:text-zinc-100">
       <TopBar
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onNewTask={handleNewTask}
+        onOpenBatch={() => setShowBatch(true)}
       />
       <div className="flex flex-1 overflow-hidden">
         {sidebarOpen && (
@@ -113,6 +129,8 @@ export default function App() {
             onNewTask={handleNewTask}
             activeView={activeView}
             onNavigate={setActiveView}
+            onOpenBatch={() => setShowBatch(true)}
+            batchOpen={showBatch}
           />
         )}
         {activeView === "connections" ? (
@@ -140,6 +158,12 @@ export default function App() {
         <NewTaskModal
           onClose={() => setShowNewTask(false)}
           onCreated={handleTaskCreated}
+        />
+      )}
+      {showBatch && (
+        <BatchPanel
+          onClose={() => setShowBatch(false)}
+          onSelectTask={handleSelectBatchTask}
         />
       )}
       {showStopConfirm && taskMirror && (

@@ -15,6 +15,7 @@ import {
   Sparkles,
   Play,
   RotateCcw,
+  Boxes,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useWorkflow } from "@/lib/store";
@@ -26,6 +27,8 @@ import type { TaskStatus } from "@/types/loop";
 interface TopBarProps {
   onToggleSidebar: () => void;
   onNewTask: () => void;
+  /** Opens the Batch drawer. */
+  onOpenBatch?: () => void;
 }
 
 /**
@@ -33,7 +36,7 @@ interface TopBarProps {
  * and a stop button when something is running. Theme + settings stay on the
  * right.
  */
-export function TopBar({ onToggleSidebar, onNewTask }: TopBarProps) {
+export function TopBar({ onToggleSidebar, onNewTask, onOpenBatch }: TopBarProps) {
   const theme = useWorkflow((s) => s.theme);
   const toggleTheme = useWorkflow((s) => s.toggleTheme);
   const taskMirror = useWorkflow((s) => s.taskMirror);
@@ -234,6 +237,18 @@ export function TopBar({ onToggleSidebar, onNewTask }: TopBarProps) {
         <IconButton aria-label="Notifications" dot>
           <Bell size={15} />
         </IconButton>
+        {onOpenBatch && (
+          <button
+            type="button"
+            onClick={onOpenBatch}
+            aria-label="Open batch runs"
+            title="Run one prompt over many items"
+            className="ml-2 flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-[12px] font-medium text-zinc-700 transition hover:border-violet-300 hover:text-violet-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-violet-500/50 dark:hover:text-violet-300"
+          >
+            <Boxes size={13} />
+            Batch
+          </button>
+        )}
         <Button
           variant="primary"
           size="sm"
