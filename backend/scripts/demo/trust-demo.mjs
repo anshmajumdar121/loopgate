@@ -11,6 +11,7 @@ import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import http from "node:http";
 import net from "node:net";
 import WebSocket from "ws";
 import { startFakeLlm } from "./fake-llm.mjs";
@@ -71,7 +72,15 @@ function killBackendHard() {
   });
 }
 const api = async (method, path, body) => {
-  const r = await fetch(B + path, { method, headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const request = () => fetch(B + path, { method, headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  let r;
+  try {
+    r = await request();
+  } catch (e) {
+    if (method !== "GET") throw e;
+    await sleep(300);
+    r = await request();
+  }
   const t = await r.text();
   let d;
   try { d = JSON.parse(t); } catch { d = t; }
@@ -110,19 +119,24 @@ async function runTask(mode, prompt, { stopWhen, timeoutMs = 60000 } = {}) {
   const r = await api("POST", "/api/tasks", { prompt, model, autoApprovePlan: true, workdir: wd });
   if (r.status !== 201) throw new Error(`create ${r.status} ${JSON.stringify(r.d).slice(0, 200)}`);
   const id = r.d.task.id;
-  const t0 = Date.now();
   let task;
-  while (Date.now() - t0 < timeoutMs) {
-    await sleep(400);
-    task = (await api("GET", `/api/tasks/${id}`)).d.task;
-    if (["done", "escalated", "cancelled"].includes(task.status)) break;
-    if (stopWhen?.(task)) break;
+  try {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      await sleep(400);
+      task = (await api("GET", `/api/tasks/${id}`)).d.task;
+      if (["done", "escalated", "cancelled"].includes(task.status)) break;
+      if (stopWhen?.(task)) break;
+    }
+    return { task, wd };
+  } finally {
+    if (!["done", "escalated", "cancelled"].includes(task?.status)) {
+      try {
+        await api("POST", `/api/tasks/${id}/stop`);
+        await sleep(800);
+      } catch {}
+    }
   }
-  if (!["done", "escalated", "cancelled"].includes(task.status)) {
-    await api("POST", `/api/tasks/${id}/stop`);
-    await sleep(800);
-  }
-  return { task, wd };
 }
 
 async function waitBatch(id, pred, timeoutMs = 240000) {
@@ -150,8 +164,45 @@ async function main() {
     return [await alive(), `response: ${line}; alive after: ${await alive()}`];
   });
   await check("Oversized request body is refused (20 MB → 413)", ["body", "server"], async () => {
-    const r = await fetch(B + "/api/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: Buffer.alloc(20 * 1024 * 1024, 97) }).catch((e) => ({ status: "ERR " + e.message }));
-    return [r.status === 413, `status ${r.status}`];
+    const status = await new Promise((resolve) => {
+      let settled = false;
+      let statusReceived = false;
+      let errorTimer;
+      let timeout;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(errorTimer);
+        clearTimeout(timeout);
+        resolve(value);
+      };
+      const req = http.request({
+        host: "127.0.0.1",
+        port: PORT,
+        path: "/api/tasks",
+        method: "POST",
+        agent: false,
+        headers: { "content-type": "application/json", "content-length": 20 * 1024 * 1024, connection: "keep-alive" },
+      }, (res) => {
+        statusReceived = true;
+        res.on("error", () => {});
+        res.resume();
+        finish(res.statusCode);
+      });
+      timeout = setTimeout(() => {
+        finish("TIMEOUT");
+        req.destroy();
+      }, 10_000);
+      req.on("error", (e) => {
+        if (!statusReceived) {
+          errorTimer = setTimeout(() => {
+            if (!statusReceived) finish("ERR " + e.code);
+          }, 2_000);
+        }
+      });
+      req.end(Buffer.alloc(20 * 1024 * 1024, 97));
+    });
+    return [status === 413, `status ${status}`];
   });
   await check("Foreign Host header is rejected (DNS-rebinding guard)", ["host", "server"], async () => {
     const line = await raw(`GET /api/fs/home HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n`);
