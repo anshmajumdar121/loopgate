@@ -8,7 +8,9 @@
 
 ![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
-🌐 **Live demo:** _coming soon_ <!-- LIVE_DEMO_URL: replace "_coming soon_" with your Render URL, e.g. https://loopgate-demo.onrender.com — see docs/DEPLOY_DEMO.md --> (public sandbox on the offline fake LLM; resets on restart. [Host your own](docs/DEPLOY_DEMO.md).)
+🌐 **Live demo preview: [anshmajumdar121.github.io/loopgate](https://anshmajumdar121.github.io/loopgate/)** — no login, no install.
+It replays a recorded real run in your browser, so it is a demo preview for testing, **not the full project**:
+nothing you type is executed. To run Loopgate for real, see [Try it in 60 seconds](#try-it-in-60-seconds-no-api-key-no-network).
 
 ## Try it in 60 seconds (no API key, no network)
 

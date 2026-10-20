@@ -1,11 +1,47 @@
 # Deploy a public Loopgate demo
 
+There are two ways to give people a clickable link:
+
+| | GitHub Pages preview | Hosted demo (Render) |
+|---|---|---|
+| What runs | Nothing. A recorded real run replays in the browser. | The real backend, on the offline fake LLM |
+| Visitors can | watch the loop, click every node and task, replay | start their own batches (capped) |
+| Cost / setup | free, GitHub only, ~2 min | free Render account, ~10 min |
+
+## GitHub Pages preview (GitHub only)
+
+The page states in a fixed banner that it is a demo preview, not the full project.
+
+1. Merge `feat/public-demo-mode` into `main` and push it.
+2. On GitHub, open the repo's **Settings → Pages**. Under **Build and deployment → Source**,
+   choose **GitHub Actions**.
+3. Open **Actions → Demo preview (GitHub Pages) → Run workflow**. Pushes to `main` that touch
+   `ui/` also redeploy it automatically.
+4. When the workflow finishes, the link is `https://anshmajumdar121.github.io/loopgate/`. The
+   README's "Live demo preview" line already points there.
+
+To re-record the run after changing the loop (it captures every WebSocket message and REST
+snapshot of a real backend run on the fake LLM, with local paths scrubbed):
+
+```powershell
+cd backend; node --import tsx scripts/demo/record-static-demo.mjs   # writes ui/src/staticDemo/recording.json
+```
+
+To check the Pages build locally:
+
+```powershell
+cd ui; $env:VITE_STATIC_DEMO = "1"; npx vite build --base /loopgate/ --outDir dist-pages; npx vite preview --base /loopgate/ --outDir dist-pages
+# → http://localhost:4173/loopgate/
+```
+
+## Hosted demo (Render)
+
 The normal backend trusts its local user and **must never be exposed** (no auth, plaintext
 API keys, arbitrary workdirs). `LOOP_PUBLIC_DEMO=1` turns it into a locked-down sandbox
 that is safe to put on the internet. In that mode one process serves the UI, the API and
 the WebSocket, and every run uses the bundled offline fake LLM.
 
-## Exact steps (Render, free)
+### Steps (Render, free)
 
 1. **Get the deploy files onto `main`.** Render deploys the repo's default branch. Merge
    `feat/public-demo-mode` into `main` and push it.
@@ -31,8 +67,8 @@ the WebSocket, and every run uses the bundled offline fake LLM.
    Then open the URL. You should see the amber "Public demo" banner. Click **Batch** and use
    template `Build a landing page for {{item}}` with items `Acme Coffee`, `Nimbus Cloud` and
    `FAIL-ME Corp`.
-7. **Put the URL in the README.** Replace the `Live demo` placeholder near the top of
-   `README.md`.
+7. **Optional: link it from the README**, next to the "Live demo preview" line. That line points
+   to the GitHub Pages preview.
 
 **Free-tier behaviour:** the service sleeps after 15 minutes without traffic, and the first
 visit after that takes about a minute to wake it. Each restart or deploy starts with an empty
@@ -42,7 +78,7 @@ demo (data lives in `/tmp`).
 **Docker** and **Instance type** to **Free**, then add the env vars `LOOP_PUBLIC_DEMO=1`
 and `LOOP_HOST=0.0.0.0`.
 
-## Other hosts (same Dockerfile)
+### Other hosts (same Dockerfile)
 
 - **Railway:** New Project → Deploy from GitHub repo. It detects the `Dockerfile`. Then go to
   Settings → Networking → Generate Domain. `PORT` and `RAILWAY_PUBLIC_DOMAIN` are injected and
@@ -51,7 +87,7 @@ and `LOOP_HOST=0.0.0.0`.
   `internal_port = 10000` in `fly.toml`, then run `fly deploy`. `<app>.fly.dev` is
   allowlisted via `FLY_APP_NAME`.
 
-## Try it locally first
+### Try the hosted mode locally
 
 With Docker:
 
@@ -67,7 +103,7 @@ cd ui; npm install; npm run build; cd ..\backend; npm install
 $env:LOOP_PUBLIC_DEMO = "1"; npx tsx src/index.ts   # → http://localhost:3001
 ```
 
-## What demo mode locks down
+### What hosted demo mode locks down
 
 | Risk on a public host | What demo mode does |
 |---|---|
