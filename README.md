@@ -6,9 +6,7 @@
 [![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)](#quick-start)
 [![trust scoreboard 11/11](https://img.shields.io/badge/trust%20scoreboard-11%2F11-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts)
 
-[![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)](docs/media/loopgate-demo.mp4)
-
-▶ **[Watch the full demo (MP4, 1 min 55 s, 1080p)](docs/media/loopgate-demo.mp4)**: a 4-item batch from the real UI, the verifier's results, and the 11/11 trust scoreboard. The GIF above plays at 3x speed.
+![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
 ## Try it in 60 seconds (no API key, no network)
 
