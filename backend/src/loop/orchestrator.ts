@@ -65,8 +65,14 @@ import {
 } from "../store/connections.js";
 import { ensureFreshHealth } from "./connection-health.js";
 import { closeV2EventLogs, isV2EngineEnabled, runLoopV2 } from "./v2/engine.js";
+import { getV2EventLog } from "./v2/engine.js";
+import { runDeterministicChecks, type DeterministicCheckResult } from "./v2/checks.js";
+import { inspectMakerAttempt, snapshotWorkdir, type AntiCheatResult, type WorkdirSnapshot } from "./v2/anti-cheat.js";
+import { evaluateApprovalGate, canUseScriptThreshold, type ApprovalGateDecision } from "./v2/gate.js";
+import { parseStructuredVerdict, type PlanSchema, type VerdictSchema } from "./v2/schemas.js";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
+import { isPublicDemo } from "../demo/publicDemo.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tunables
@@ -708,6 +714,7 @@ try {
     let currentGoalContent = "";
     let currentAdjustments = "";
     let planAdjustCount = 0;
+    let structuredPlan: PlanSchema | null = null;
 
     while (true) {
       if (skipPlanning) {
@@ -832,6 +839,21 @@ try {
       if (bailIfCancelled(taskId, log, "after planner write")) return;
 
       const plan: PlanSummary = parsePlanGoal(goalContent);
+      try {
+        structuredPlan = await buildStructuredPlan(plan, initialTask.workdir);
+      } catch (error) {
+        log("planner", "stderr", `✗ structured plan rejected: ${errorMsg(error)}`);
+        if (planAdjustCount < MAX_PLAN_ADJUSTS) {
+          currentAdjustments =
+            "Your previous plan was rejected because its deterministic checks were invalid. " +
+            "Use only npm/npx/node/pnpm/yarn test, run build/lint/typecheck, tsc, or vitest commands.";
+          currentGoalContent = goalContent;
+          planAdjustCount++;
+          continue;
+        }
+        escalate(taskId, `Invalid deterministic plan: ${errorMsg(error)}`, log, emit);
+        return;
+      }
       // Plan-quality gate: a plan without completion criteria is
       // unverifiable — the verifier would be reduced to vibes. Re-plan
       // automatically with explicit instructions; only escalate to the user
@@ -947,6 +969,10 @@ try {
       // Loop continues — re-spawn planner with the adjustments + existing plan.
     }
 
+    if (!structuredPlan && initialTask.plan) {
+      structuredPlan = await buildStructuredPlan(initialTask.plan, initialTask.workdir);
+    }
+
     // ─── Phase 2 + 3: IMPLEMENT ↔ VERIFY ────────────────────────────────
     while (true) {
       if (isCancelled(taskId)) {
@@ -997,6 +1023,11 @@ try {
       // attempt's contents to detect the "no effective change" failure
       // mode). Populated below from task.diff.filesChanged.
       let previousFilesSnapshot: Record<string, string> = {};
+      let makerBeforeSnapshot: WorkdirSnapshot | null = null;
+      let antiCheat: AntiCheatResult = { clean: true, reasons: [], changes: [] };
+      let deterministicChecks: DeterministicCheckResult[] = [];
+      let runtimeUnavailableReason: string | null = null;
+      let gateDecision: ApprovalGateDecision | null = null;
 
       // These four are filled in by either the implementation block
       // below or by the resume-skip branch — Phase 3 (verify) reads
@@ -1062,6 +1093,15 @@ try {
           }
         }
 
+        try {
+          makerBeforeSnapshot = await snapshotWorkdir(task.workdir);
+        } catch (error) {
+          antiCheat = {
+            clean: false,
+            reasons: [`could not snapshot workdir before maker: ${errorMsg(error)}`],
+            changes: [],
+          };
+        }
         const latestState = watcher.getLatestContent("STATE.md");
         const feedback = LAST_FEEDBACK.get(taskId);
         const makerPrompt = buildMakerPrompt(
@@ -1187,6 +1227,25 @@ try {
         }
         diff = parsed.diff;
 
+        if (makerBeforeSnapshot) {
+          try {
+            const makerAfterSnapshot = await snapshotWorkdir(task.workdir);
+            const attemptedPaths = extractBlockedWritePaths(stateAfterMake);
+            antiCheat = await inspectMakerAttempt(makerBeforeSnapshot, makerAfterSnapshot, {
+              attemptedPaths,
+            });
+            if (!antiCheat.clean) {
+              log("orchestrator", "stderr", `✗ ANTI-CHEAT — ${antiCheat.reasons.join("; ")}`);
+            }
+          } catch (error) {
+            antiCheat = {
+              clean: false,
+              reasons: [`could not inspect maker diff: ${errorMsg(error)}`],
+              changes: [],
+            };
+          }
+        }
+
         updateTask(taskId, { diff });
         appendHistory(
           taskId,
@@ -1294,7 +1353,9 @@ try {
         // runtime report. The verifier (Phase 3) still runs and scores
         // the rubric. We do this BEFORE runBuildStep so a no-package.json
         // workdir doesn't even spin up the runner.
-        if (isScriptWorkdir(getTask(taskId)?.plan)) {
+        if (!antiCheat.clean) {
+          log("orchestrator", "stderr", "▶ BUILD/RUNTIME — skipped after anti-cheat rejection");
+        } else if (isScriptWorkdir(getTask(taskId)?.plan)) {
           log(
             "orchestrator",
             "info",
@@ -1422,10 +1483,41 @@ try {
           const t3 = getTask(taskId);
           if (t3) broadcaster.broadcast(taskId, { type: "task_update", taskId, task: t3 });
         } catch (err) {
-          log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — verifier will judge from source only`);
+          runtimeUnavailableReason = "runtime check unavailable";
+          log("orchestrator", "stderr", `runtime check failed to run: ${errorMsg(err)} — fail-closed gate will reject approval`);
         }
         } // end else (!isScriptWorkdir)
       } // end else (skipImplementation)
+
+      if (structuredPlan) {
+        try {
+          const eventLog = isV2EngineEnabled() ? safeGetV2EventLog() : undefined;
+          const checkPlan = antiCheat.clean ? structuredPlan : { ...structuredPlan, checks: [] };
+          deterministicChecks = await runDeterministicChecks(checkPlan, {
+            workdir: task.workdir,
+            changedFiles: diff?.filesChanged.map((file) => file.path) ?? [],
+            eventLog,
+            runId: `run:${taskId}`,
+            itemId: `item:${taskId}`,
+            attemptId: `attempt:${taskId}:${attempt}`,
+          });
+          const failed = deterministicChecks.filter((check) => !check.passed);
+          if (failed.length > 0) {
+            log("orchestrator", "stderr", `✗ DETERMINISTIC CHECKS — ${failed.map((check) => check.reason ?? check.id).join("; ")}`);
+          } else {
+            log("orchestrator", "info", `✓ DETERMINISTIC CHECKS — ${deterministicChecks.length} checks passed`);
+          }
+        } catch (error) {
+          deterministicChecks = [{
+            id: "checks-runner",
+            kind: "check",
+            ref: "check:checks-runner",
+            passed: false,
+            reason: `deterministic checks runner crashed: ${errorMsg(error)}`,
+          }];
+          log("orchestrator", "stderr", deterministicChecks[0].reason!);
+        }
+      }
 
       // Bail if the user stopped us between implement and verify.
       if (bailIfCancelled(taskId, log, "before verification")) return;
@@ -1637,7 +1729,28 @@ try {
         }
       }
 
-      let { verdict } = parseStateDiff(verifierOwnedText(stateBeforeVerify, stateAfterVerify));
+      const verifierResponse = verifierOwnedText(stateBeforeVerify, stateAfterVerify);
+      const structuredResponse = parseStructuredVerdict(verifierResponse);
+      const structuredVerifier = structuredResponse.verdict;
+      let { verdict } = structuredVerifier
+        ? legacyVerdictFromStructured(structuredVerifier, structuredPlan)
+        : parseStateDiff(verifierResponse);
+      if (structuredResponse.malformed) {
+        verdict = {
+          attempt,
+          outcome: "REJECT",
+          buildExit: null,
+          testsPassed: 0,
+          testsFailed: 0,
+          scopePass: false,
+          intentPass: false,
+          noCheatingPass: false,
+          risk: "HIGH",
+          criteriaWalk: [],
+          requiredFixes: [structuredResponse.error ?? "malformed verdict"],
+          oneLineReason: structuredResponse.error ?? "malformed verdict",
+        };
+      }
       if (verdict && verdict.attempt !== attempt) {
         log(
           "verifier",
@@ -1770,6 +1883,43 @@ try {
             "stderr",
             `✗ criteria-walk retry failed (${errorMsg(retryErr)}) — keeping first verdict`
           );
+        }
+      }
+
+      if (structuredPlan) {
+        const verifierForGate = structuredVerifier ?? structuredVerdictFromLegacy(verdict, structuredPlan);
+        const eventLog = isV2EngineEnabled() ? safeGetV2EventLog() : undefined;
+        gateDecision = evaluateApprovalGate({
+          plan: structuredPlan,
+          verifier: verifierForGate,
+          checks: deterministicChecks,
+          antiCheat,
+          writePolicy: {
+            clean: !/\*\*Blocked writes\*\*/i.test(stateAfterMake),
+            reasons: extractBlockedWritePaths(stateAfterMake).map((path) => `blocked write: ${path}`),
+          },
+          runtime: {
+            required: !isScriptWorkdir(getTask(taskId)?.plan) && !isPublicDemo(),
+            available: runtime !== null && runtimeUnavailableReason === null,
+            passed: runtime?.ok === true,
+            reason: runtimeUnavailableReason ?? (runtime && !runtime.ok ? "runtime check failed" : undefined),
+          },
+          goalText: `${initialTask.prompt}\n${latestGoal}`,
+          malformedVerdict: structuredResponse.malformed,
+          eventLog,
+          runId: `run:${taskId}`,
+          itemId: `item:${taskId}`,
+          attemptId: `attempt:${taskId}:${attempt}`,
+          existingFiles: deterministicChecks.filter((check) => check.kind === "file" && check.passed).map((check) => check.ref),
+        });
+        if (!gateDecision.approved) {
+          verdict = {
+            ...verdict,
+            outcome: "REJECT",
+            requiredFixes: gateDecision.requiredFixes,
+            oneLineReason: gateDecision.requiredFixes[0] ?? "approval gate rejected the attempt",
+          };
+          log("orchestrator", "stderr", `✗ APPROVAL GATE — ${gateDecision.requiredFixes.join("; ")}`);
         }
       }
 
@@ -1952,6 +2102,29 @@ try {
         const threshold = SCRIPT_LOOP_MIN_SCORE_OUT_OF_10;
         const failedCriteria = verdict.criteriaWalk.filter((c) => !c.passed);
         if (scaledScore >= threshold) {
+          if (structuredPlan) {
+            const scriptGate = evaluateApprovalGate({
+              plan: structuredPlan,
+              verifier: structuredVerifier ?? structuredVerdictFromLegacy(verdict, structuredPlan),
+              checks: deterministicChecks,
+              antiCheat,
+              writePolicy: { clean: !/\*\*Blocked writes\*\*/i.test(stateAfterMake) },
+              runtime: { required: false, available: true, passed: true },
+              goalText: `${initialTask.prompt}\n${latestGoal}`,
+              scriptThresholdUsed: true,
+              scriptThresholdSatisfied: true,
+              eventLog: isV2EngineEnabled() ? safeGetV2EventLog() : undefined,
+              runId: `run:${taskId}`,
+              itemId: `item:${taskId}`,
+              attemptId: `attempt:${taskId}:${attempt}`,
+              existingFiles: deterministicChecks.filter((check) => check.kind === "file" && check.passed).map((check) => check.ref),
+            });
+            if (!scriptGate.approved) {
+              log("orchestrator", "stderr", `✗ SCRIPT APPROVAL GATE — ${scriptGate.requiredFixes.join("; ")}`);
+              LAST_FEEDBACK.set(taskId, scriptGate.requiredFixes.join("\n"));
+              continue;
+            }
+          }
           const summary = `Script approved with score ${scaledScore}/10 (${passCount}/${totalCriteria} criteria pass) on attempt ${attempt}.`;
           log(
             "orchestrator",
@@ -2059,7 +2232,12 @@ try {
     //
     // All other tasks keep the original behavior: escalate.
     const finalTask = getTask(taskId);
-    if (isScriptWorkdir(finalTask?.plan) && finalTask?.attempts?.length) {
+    if (
+      isScriptWorkdir(finalTask?.plan) &&
+      structuredPlan &&
+      canUseScriptThreshold(structuredPlan, `${initialTask.prompt}\n${structuredPlan.criteria.map((criterion) => criterion.text).join("\n")}`) &&
+      finalTask?.attempts?.length
+    ) {
       const sorted = [...finalTask.attempts].sort(
         (a, b) => (b.score ?? 0) - (a.score ?? 0)
       );
@@ -2642,6 +2820,104 @@ async function buildVerifierPrompt(
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function buildStructuredPlan(plan: PlanSummary, workdir: string): Promise<PlanSchema> {
+  const checks: PlanSchema["checks"] = [];
+  try {
+    const packageJson = JSON.parse(await readFile(pathResolve(workdir, "package.json"), "utf8")) as {
+      scripts?: Record<string, unknown>;
+    };
+    const scripts = packageJson.scripts ?? {};
+    if (typeof scripts.test === "string") checks.push({ id: "test", cmd: ["npm", "test"], timeoutMs: 5 * 60_000 });
+    if (typeof scripts.build === "string") checks.push({ id: "build", cmd: ["npm", "run", "build"], timeoutMs: 5 * 60_000 });
+    if (typeof scripts.lint === "string") checks.push({ id: "lint", cmd: ["npm", "run", "lint"], timeoutMs: 5 * 60_000 });
+    if (typeof scripts.typecheck === "string") checks.push({ id: "typecheck", cmd: ["npm", "run", "typecheck"], timeoutMs: 5 * 60_000 });
+  } catch {
+    // Static workdirs have no package scripts; built-in file/scope checks still run.
+  }
+  return {
+    criteria: plan.criteria.map((text, index) => ({ id: `criterion-${index + 1}`, text })),
+    filesToTouch: [...plan.filesToTouch],
+    checks,
+  } satisfies PlanSchema;
+}
+
+function safeGetV2EventLog() {
+  try {
+    return getV2EventLog();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractBlockedWritePaths(state: string): string[] {
+  const match = state.match(/\*\*Blocked writes\*\*[^:]*:\s*([^\n]+)/i);
+  if (!match) return [];
+  return match[1]
+    .split(/;\s*/)
+    .map((entry) => entry.replace(/\s*\([^)]*\)\s*$/, "").trim())
+    .filter(Boolean);
+}
+
+function legacyVerdictFromStructured(
+  structured: VerdictSchema,
+  plan: PlanSchema | null,
+): { verdict: import("../types.js").Verdict } {
+  const criteriaWalk = (plan?.criteria ?? []).map((criterion) => {
+    const item = structured.criteria.find((candidate) => candidate.id === criterion.id);
+    return {
+      criterion: criterion.text,
+      passed: item?.passed === true,
+      evidence: item ? `${item.evidence.kind}:${item.evidence.ref}` : "missing evidence",
+    };
+  });
+  const outcome = structured.outcome === "APPROVE"
+    ? "APPROVE"
+    : structured.outcome === "ESCALATE"
+    ? "ESCALATE_HUMAN"
+    : "REJECT";
+  return {
+    verdict: {
+      attempt: structured.attempt,
+      outcome,
+      buildExit: null,
+      testsPassed: 0,
+      testsFailed: 0,
+      scopePass: outcome === "APPROVE",
+      intentPass: outcome === "APPROVE",
+      noCheatingPass: outcome === "APPROVE",
+      risk: "LOW",
+      criteriaWalk,
+      requiredFixes: [...structured.requiredFixes],
+      oneLineReason: structured.requiredFixes[0] ?? `${criteriaWalk.filter((item) => item.passed).length}/${criteriaWalk.length} criteria pass`,
+    },
+  };
+}
+
+function structuredVerdictFromLegacy(
+  verdict: import("../types.js").Verdict,
+  plan: PlanSchema,
+): VerdictSchema {
+  return {
+    attempt: verdict.attempt,
+    outcome: verdict.outcome === "APPROVE" ? "APPROVE" : verdict.outcome === "ESCALATE_HUMAN" ? "ESCALATE" : "REJECT",
+    criteria: plan.criteria.map((criterion, index) => {
+      const legacy = verdict.criteriaWalk[index];
+      const firstFile = plan.filesToTouch[0] ?? "";
+      const rawEvidence = legacy?.evidence ?? "";
+      const kind = rawEvidence.startsWith("check:") ? "check" : "file";
+      const ref = rawEvidence.startsWith("check:") || rawEvidence.startsWith("file:")
+        ? rawEvidence.replace(/^(check|file):/, "")
+        : firstFile;
+      return {
+        id: criterion.id,
+        passed: legacy?.passed === true,
+        evidence: { kind, ref },
+      };
+    }),
+    requiredFixes: [...verdict.requiredFixes],
+  };
+}
 
 function extractAdjustments(value: unknown): string {
   if (typeof value !== "object" || value === null) return "";
