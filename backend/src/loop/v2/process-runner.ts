@@ -132,7 +132,7 @@ function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-function killWindowsProcessTree(pid: number): void {
+function killWindowsProcessTree(pid: number, fallback: () => void): void {
   // taskkill is available on supported Windows versions and is invoked with
   // an argument array, never through a shell or a user-provided command.
   void execa(
@@ -145,12 +145,22 @@ function killWindowsProcessTree(pid: number): void {
       stderr: "ignore",
       windowsHide: true,
     }
-  );
+  ).then((result) => {
+    // If taskkill is unavailable or loses a race with process exit, retain
+    // Execa's direct-child cancellation as the final fallback. The fallback
+    // is intentionally invoked only after taskkill reports failure so the
+    // Windows tree kill gets first refusal.
+    if (result.failed) fallback();
+  }).catch(() => fallback());
 }
 
-function terminateProcessTree(pid: number, forceKillAfterDelay: number | false): ReturnType<typeof setTimeout> | undefined {
+function terminateProcessTree(
+  pid: number,
+  forceKillAfterDelay: number | false,
+  fallback: () => void,
+): ReturnType<typeof setTimeout> | undefined {
   if (process.platform === "win32") {
-    killWindowsProcessTree(pid);
+    killWindowsProcessTree(pid, fallback);
     return undefined;
   }
 
@@ -245,7 +255,17 @@ export async function runProcess(options: ProcessRunOptions): Promise<ProcessRun
   const terminateTree = (): void => {
     if (exited || subprocess.pid === undefined || treeTerminationRequested) return;
     treeTerminationRequested = true;
-    treeKillTimer = terminateProcessTree(subprocess.pid, forceKillAfterDelay);
+    treeKillTimer = terminateProcessTree(
+      subprocess.pid,
+      forceKillAfterDelay,
+      () => {
+        try {
+          subprocess.kill();
+        } catch {
+          // The child may have exited between taskkill and the fallback.
+        }
+      },
+    );
   };
 
   const onAbort = (): void => {
