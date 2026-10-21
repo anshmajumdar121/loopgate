@@ -39,25 +39,29 @@ async function freePort() {
     });
   });
 }
-async function startBackend() {
+async function startBackend({ playwrightBrowsersPath } = {}) {
   // Pick an ephemeral loopback port by default so a stale dev server cannot
   // make this isolated demo fail before the first scoreboard check. An
   // explicit DEMO_PORT still wins for callers that need a stable port.
   if (!PORT) PORT = await freePort();
   B = `http://127.0.0.1:${PORT}`;
+  const backendEnv = {
+    ...process.env,
+    PORT: String(PORT),
+    LOOP_HOST: "127.0.0.1",
+    LOOP_DATA_DIR: join(SBX, "data", "tasks"),
+    LOOP_WORKSPACES_ROOT: join(SBX, "ws"),
+    LOOP_WORKDIR: join(SBX, "work"),
+    LOOP_PREVIEW_PORT: String(PORT + 80),
+    LOOP_PHASE_TIMEOUT_MS: "30000",
+    CONN_HEALTH_INTERVAL_MS: "3600000",
+  };
+  if (playwrightBrowsersPath !== undefined) {
+    backendEnv.PLAYWRIGHT_BROWSERS_PATH = playwrightBrowsersPath;
+  }
   backend = spawn(process.execPath, [TSX, "src/index.ts"], {
     cwd: BACKEND,
-    env: {
-      ...process.env,
-      PORT: String(PORT),
-      LOOP_HOST: "127.0.0.1",
-      LOOP_DATA_DIR: join(SBX, "data", "tasks"),
-      LOOP_WORKSPACES_ROOT: join(SBX, "ws"),
-      LOOP_WORKDIR: join(SBX, "work"),
-      LOOP_PREVIEW_PORT: String(PORT + 80),
-      LOOP_PHASE_TIMEOUT_MS: "30000",
-      CONN_HEALTH_INTERVAL_MS: "3600000",
-    },
+    env: backendEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   backend.log = [];
@@ -339,8 +343,22 @@ async function main() {
     return [task.status !== "done" && hasReason(task, "policy:path-escape") && outside.every((path) => !existsSync(path)), `status ${task.status}; ${requiredFixes(task).join(" | ")}`];
   });
   await check("Runtime check unavailable on a page task fails closed", ["runtime", "chromium", "trust"], async () => {
-    const { task } = await runTask("runtime_unavailable", "Build a hello page [force-runtime-unavailable]", { maxAttempts: 1 });
-    return [task.status !== "done" && /runtime check unavailable/i.test((task.verdict?.requiredFixes || []).join("\n")), `status ${task.status}`];
+    const emptyBrowsers = mkdtempSync(join(tmpdir(), "loop-empty-browsers-"));
+    try {
+      await killBackendHard();
+      await startBackend({ playwrightBrowsersPath: emptyBrowsers });
+      const { task } = await runTask("runtime_unavailable", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });
+      const reason = requiredFixes(task).find((entry) => entry.startsWith("gate:runtime-unavailable")) || "";
+      return [task.status !== "done" && hasReason(task, "gate:runtime-unavailable"), `status ${task.status}; ${reason}`];
+    } finally {
+      await killBackendHard();
+      await startBackend();
+      try {
+        rmSync(emptyBrowsers, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+      } catch (error) {
+        console.warn(`warning: could not remove temporary browser path: ${error?.message || error}`);
+      }
+    }
   });
 
   // ── Map node: repetitive work ────────────────────────────────────────

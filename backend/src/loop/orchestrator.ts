@@ -1434,10 +1434,7 @@ try {
         // The verifier gets this evidence verbatim; a broken page can no
         // longer be APPROVEd on source-reading alone. `runtime` is reused
         // below by the verifier-prompt builder and the REJECT-feedback path.
-        if (/\[force-runtime-unavailable\]/i.test(initialTask.prompt)) {
-          runtimeUnavailableReason = "runtime check unavailable";
-          log("orchestrator", "stderr", "runtime check intentionally unavailable for this fail-closed demo task");
-        } else try {
+        try {
           runtimeStartMs = Date.now();
           // Snapshot the bind counter before/after so we can detect a
           // self-healing restart and tell the user the preview link
