@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,7 +14,7 @@ afterEach(async () => {
 });
 
 async function makeWorkdir(): Promise<string> {
-  const dir = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "loop-anticheat-"));
+  const dir = await mkdtemp(join(tmpdir(), "loop-anticheat-"));
   dirs.push(dir);
   return dir;
 }
