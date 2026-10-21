@@ -209,6 +209,15 @@ async function check(name, keywords, fn) {
   } catch (e) {
     detail = "threw: " + (e?.message || e);
   }
+  // If the isolated backend died, the real cause is in its own output, not
+  // in the client-side "fetch failed". Print it once so CI logs show it.
+  if (backend && backend.exitCode !== null && !backend.deathReported) {
+    backend.deathReported = true;
+    detail += `
+${C.r}isolated backend exited (code ${backend.exitCode}, signal ${backend.signalCode}); last output:${C.x}
+` +
+      backend.log.join("").slice(-4000);
+  }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   results.push({ name, ok, detail });
   process.stdout.write(`\r${ok ? C.g + "PASS" : C.r + "FAIL"}${C.x} ${name} ${C.d}(${secs}s) ${detail}${C.x}\n`);
