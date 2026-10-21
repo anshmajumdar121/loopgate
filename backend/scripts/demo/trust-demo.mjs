@@ -17,6 +17,7 @@ import WebSocket from "ws";
 import { chromium } from "playwright";
 import { startFakeLlm } from "./fake-llm.mjs";
 import { trustExitCode } from "./trust-exit-code.mjs";
+import { matchesScoreboardCheck } from "./trust-output.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKEND = join(HERE, "..", "..");
@@ -24,7 +25,7 @@ let PORT = Number(process.env.DEMO_PORT || 0);
 const LLM_PORT = Number(process.env.DEMO_LLM_PORT || 0);
 let B = "";
 const SBX = mkdtempSync(join(tmpdir(), "loop-trust-demo-"));
-const filter = process.argv.slice(2).map((s) => s.toLowerCase());
+const filter = process.argv.slice(2);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const C = { g: "\x1b[32m", r: "\x1b[31m", y: "\x1b[33m", d: "\x1b[2m", b: "\x1b[1m", x: "\x1b[0m" };
 
@@ -199,7 +200,7 @@ const raw = (text) =>
 let llm, model;
 const results = [];
 async function check(name, keywords, fn) {
-  if (filter.length && !filter.some((f) => f === name || keywords.includes(f))) return;
+  if (!matchesScoreboardCheck(filter, name, keywords)) return;
   process.stdout.write(`${C.d}…${C.x} ${name}`);
   const t0 = Date.now();
   let ok = false, detail = "";

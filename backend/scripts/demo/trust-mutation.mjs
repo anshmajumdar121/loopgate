@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { stripAnsi, scoreboardResult, mutationProven, isChromiumPreflightFailure } from "./trust-output.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TRUST_DEMO = join(HERE, "trust-demo.mjs");
@@ -22,16 +23,6 @@ const cases = [
   ["path-escape", "Traversal and absolute-path writes stay inside the workdir"],
   ["runtime-unavailable", "Runtime check unavailable on a page task fails closed"],
 ];
-
-function stripAnsi(value) {
-  return value.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-function scoreboardResult(output, checkName) {
-  const escaped = checkName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^(PASS|FAIL) ${escaped}(?:\\s|$)`);
-  return stripAnsi(output).split(/\r?\n/).map((line) => line.trim()).find((line) => re.test(line)) ?? null;
-}
 
 function runCase(checkName, { rule, mutate }) {
   return new Promise((resolve) => {
@@ -73,26 +64,30 @@ try {
     for (const [rule, checkName] of cases) {
       const baseline = await runCase(checkName, { rule, mutate: false });
       const baselineOutput = baseline.stdout + "\n" + baseline.stderr;
-      const baselineLine = scoreboardResult(baselineOutput, checkName);
-      if (baseline.code === 2 || baselineLine === null) {
-        console.log(`${C.r}FAIL${C.x} ${rule}${C.d} — baseline did not produce an exact PASS line${C.x}`);
-        if (process.env.DEBUG_TRUST_MUTATION === "1") console.log(stripAnsi(baselineOutput));
-        process.exitCode = baseline.code === 2 ? 2 : 1;
+      if (isChromiumPreflightFailure(baseline)) {
+        process.exitCode = 2;
+        console.error(stripAnsi(baseline.stderr).trim());
         break;
+      }
+      const baselineLine = scoreboardResult(baseline.stdout, checkName);
+      if (baseline.code !== 0 || !baselineLine?.startsWith("PASS ")) {
+        console.log(`${C.r}FAIL${C.x} ${rule}${C.d} — baseline failed; mutation not run${C.x}`);
+        if (process.env.DEBUG_TRUST_MUTATION === "1") console.log(stripAnsi(baselineOutput));
+        continue;
       }
       const mutated = await runCase(checkName, { rule, mutate: true });
       const mutatedOutput = mutated.stdout + "\n" + mutated.stderr;
-      const mutatedLine = scoreboardResult(mutatedOutput, checkName);
-      const ok = baseline.code === 0 && baselineLine.startsWith("PASS ") && mutated.code === 1 && mutatedLine?.startsWith("FAIL ");
+      if (isChromiumPreflightFailure(mutated)) {
+        process.exitCode = 2;
+        console.error(stripAnsi(mutated.stderr).trim());
+        break;
+      }
+      const ok = mutationProven(baseline, mutated, checkName);
       if (ok) passed += 1;
-      console.log(`${ok ? C.g + "PASS" : C.r + "FAIL"}${C.x} ${rule}${C.d} — baseline PASS -> mutated FAIL${C.x}`);
+      console.log(`${ok ? C.g + "PASS" : C.r + "FAIL"}${C.x} ${rule}${C.d} — ${ok ? "baseline PASS -> mutated FAIL" : "baseline PASS -> mutation not proven"}${C.x}`);
       if (!ok && process.env.DEBUG_TRUST_MUTATION === "1") {
         console.log("BASELINE\n" + stripAnsi(baselineOutput));
         console.log("MUTATED\n" + stripAnsi(mutatedOutput));
-      }
-      if (mutated.code === 2) {
-        process.exitCode = 2;
-        break;
       }
     }
     if (process.exitCode !== 2) {
