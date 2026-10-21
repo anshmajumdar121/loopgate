@@ -555,7 +555,7 @@ try {
     }
     if (files.length === 0) {
       const m = text.match(/```(?:html)?\s*\n([\s\S]*?)\n```/);
-      files.push({ path: "index.html", content: m ? m[1] : text });
+      if (m) files.push({ path: "index.html", content: m[1] });
     }
     const written = [];
     const blocked = [];
@@ -569,7 +569,7 @@ try {
       const abs = rp(workroot, f.path);
       if (!abs.startsWith(workroot + sep) || f.path.startsWith("/") || f.path.includes("..")) {
         process.stderr.write(`[maker] SKIPPED unsafe path: ${f.path}\n`);
-        blocked.push({ path: f.path, reason: "unsafe path" });
+        blocked.push({ path: f.path, reason: `policy:path-escape:${f.path}` });
         continue;
       }
       const verdictOnPath = checkWritePolicy(f.path, allowlist);
@@ -583,10 +583,6 @@ try {
       written.push(f.path);
       process.stderr.write(`[maker] wrote ${f.content.length} chars to ${abs}\n`);
     }
-    if (written.length === 0) {
-      process.stderr.write("llm-agent: FAIL: maker produced no writable files\n");
-      process.exit(1);
-    }
     // Append a Diff Summary to STATE.md so the orchestrator's watcher
     // sees the phase advance.
     const statePath = rp(workroot, "STATE.md");
@@ -596,13 +592,15 @@ try {
       `## Diff Summary — Attempt ${attempt}`,
       "",
       `**Files changed** (${written.length}):`,
-      ...written.map((p) => `- ${p} — implemented per plan`),
+      ...(written.length > 0
+        ? written.map((p) => `- ${p} — implemented per plan`)
+        : ["- no files written"]),
       "",
       "**Build:** not run by the maker (bridge runner has no tools) — orchestrator checks run next",
       "**Tests:** not run by the maker — orchestrator checks run next",
       "**Lint:** n/a",
       "",
-      `**New files**: ${written.join(", ")}`,
+      `**New files**: ${written.length > 0 ? written.join(", ") : "none"}`,
       ...(blocked.length > 0
         ? ["", `**Blocked writes** (${blocked.length}): ${blocked.map((b) => `${b.path} (${b.reason})`).join("; ")}`]
         : []),
@@ -612,9 +610,14 @@ try {
       ...(blocked.length > 0
         ? ["- The maker attempted writes outside the allowed set (listed above); judge scope accordingly"]
         : []),
+      ...(written.length === 0 ? ["- no files written"] : []),
     ].join("\n");
     await appendFile(statePath, summary, "utf8");
     process.stderr.write(`[maker] appended diff summary to ${statePath}\n`);
+    if (written.length === 0) {
+      process.stderr.write("[maker] no files written; continuing so deterministic checks and the approval gate can reject the attempt\n");
+      process.exit(0);
+    }
   } else if (args.role === "verifier") {
     // Text was already written to STATE.md above — chunk-by-chunk in the
     // streaming (API) path, or as a single append in the --cli path. Either
