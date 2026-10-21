@@ -1,9 +1,14 @@
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runDeterministicChecks } from "../checks.js";
 import type { PlanSchema } from "../schemas.js";
+
+// These tests spawn real processes (npx, node); cold Windows CI runners need
+// more than the 5 s default just to start npx.
+vi.setConfig({ testTimeout: 30_000 });
 
 const dirs: string[] = [];
 
