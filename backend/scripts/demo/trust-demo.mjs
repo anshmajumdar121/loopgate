@@ -416,8 +416,22 @@ try {
 } catch (e) {
   console.error(C.r + "demo crashed: " + (e?.stack || e) + C.x);
 } finally {
-  try { await killBackendHard(); } catch {}
-  llm?.close();
-  if (!process.env.DEMO_KEEP) rmSync(SBX, { recursive: true, force: true });
+  try {
+    await killBackendHard();
+  } catch (error) {
+    console.warn(`warning: backend cleanup failed: ${error?.message || error}`);
+  }
+  try {
+    llm?.close();
+  } catch (error) {
+    console.warn(`warning: fake LLM cleanup failed: ${error?.message || error}`);
+  }
+  if (!process.env.DEMO_KEEP) {
+    try {
+      rmSync(SBX, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (error) {
+      console.warn(`warning: sandbox cleanup failed: ${error?.message || error}`);
+    }
+  }
   process.exit(failures === 0 ? 0 : failures === 2 ? 2 : 1);
 }
