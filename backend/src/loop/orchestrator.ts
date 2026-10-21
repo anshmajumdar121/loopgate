@@ -1076,8 +1076,8 @@ try {
         // Capture the previous attempt's file contents BEFORE the maker
         // overwrites them — the validator's no-op guard uses this to
         // detect "the LLM wrote the same bytes as last time". For
-        // attempt 1 there's no previous, so the snapshot is empty and
-        // the guard falls back to "zero files changed" only.
+        // attempt 1 there's no previous, so the snapshot is empty.
+        // Missing outputs are caught by the deterministic file checks.
         if (task.diff?.filesChanged) {
           for (const f of task.diff.filesChanged) {
             try {
@@ -1270,7 +1270,7 @@ try {
 
         // ─── Pre-runtime validation (Task 5). Two cheap gates run
         // BEFORE we pay for the headless-browser runtime check:
-        //   (a) no-op guard: zero files, or every changed file is
+        //   (a) no-op guard: every reported changed file is
         //       byte-identical to the previous attempt
         //   (b) syntax gate: `node --check` on JS/TS files
         // On failure, set validationOutcome, save the diff (it stays
@@ -1279,12 +1279,17 @@ try {
         // The runtime check + verifier + DECIDE block are short-
         // circuited. We do NOT return from runLoop — the loop
         // continues with attempt+1.
-        const validation = await runValidation(
-          initialTask.workdir,
-          diff.filesChanged,
-          previousFilesSnapshot
-        );
-        if (!validation.passed) {
+        // An empty reported diff has no syntax to validate. It must still
+        // reach the deterministic checks and approval gate so missing files,
+        // anti-cheat findings, and blocked writes become verdict evidence.
+        const validation = diff.filesChanged.length > 0
+          ? await runValidation(
+              initialTask.workdir,
+              diff.filesChanged,
+              previousFilesSnapshot
+            )
+          : null;
+        if (validation && !validation.passed) {
           validationOutcome = validation;
           log(
             "orchestrator",
@@ -1344,8 +1349,13 @@ try {
           // labeled continue to skip the rest of the loop body.
           continue;
         }
-        // validation.passed: log success and fall through to runtime check.
-        log("orchestrator", "info", "✓ VALIDATION — passed");
+        log(
+          "orchestrator",
+          "info",
+          validation
+            ? "✓ VALIDATION — passed"
+            : "▶ VALIDATION — zero reported files; deferring to deterministic checks and approval gate"
+        );
 
         // ─── Script-loop guard: a workdir whose plan is exactly
         // `script.md` is a text-only artifact, not a webpage. Skip the
@@ -2185,6 +2195,10 @@ try {
         );
         // Fall through to the next iteration of the while loop. No
         // `waitForEvent("feedback")` — the loop is autonomous.
+      } else if (attempt >= (getTask(taskId)?.maxAttempts ?? task.maxAttempts)) {
+        // The budget is exhausted even when automatic iteration is off.
+        // Do not wait for feedback for an attempt that cannot be started.
+        break;
       } else if (getTask(taskId)?.autoIterate) {
         // Autonomous mode (batch items): the verifier's required fixes become
         // the next maker attempt's feedback. The max-attempts cap still ends
@@ -2286,7 +2300,12 @@ try {
     }
     // Max attempts exhausted — escalate (non-script tasks)
     nodeStatus("retry", "error");
-    const reason = `Exceeded max ${getTask(taskId)?.maxAttempts} attempts without APPROVE.`;
+    const lastRejection = finalTask?.verdict?.outcome === "REJECT"
+      ? finalTask.verdict.requiredFixes.join("; ") || finalTask.verdict.oneLineReason
+      : "";
+    const reason = `Exceeded max ${finalTask?.maxAttempts} attempts without APPROVE.${
+      lastRejection ? ` Last rejection: ${lastRejection}` : ""
+    }`;
     escalate(taskId, reason, log, emit);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
