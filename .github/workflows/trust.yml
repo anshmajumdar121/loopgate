@@ -1,0 +1,83 @@
+name: Trust scoreboard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  trust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium shell
+        working-directory: backend
+        run: npx playwright install --only-shell chromium
+
+      - name: Typecheck backend
+        working-directory: backend
+        run: npx tsc --noEmit
+
+      - name: Typecheck UI
+        working-directory: ui
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Run v2 tests
+        working-directory: backend
+        run: npx vitest run src/loop/v2
+
+      - name: Run legacy trust scoreboard
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          LOOP_ENGINE=legacy npm run demo:trust 2>&1 | tee trust-legacy.txt
+
+      - name: Run v2 trust scoreboard
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          LOOP_ENGINE=v2 npm run demo:trust 2>&1 | tee trust-v2.txt
+
+      - name: Run mutation proof
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run demo:trust:mutation 2>&1 | tee trust-mutation.txt
+
+      - name: Run UI tests
+        working-directory: ui
+        run: npm test
+
+      - name: Upload trust outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trust-output-${{ matrix.os }}
+          if-no-files-found: warn
+          path: |
+            backend/trust-legacy.txt
+            backend/trust-v2.txt
+            backend/trust-mutation.txt

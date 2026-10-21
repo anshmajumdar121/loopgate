@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)](#quick-start)
-[![trust scoreboard 21/21](https://img.shields.io/badge/trust%20scoreboard-21%2F21-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts)
+[![trust scoreboard 21/21](https://img.shields.io/badge/trust%20scoreboard-21%2F21-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts) [![trust workflow](https://github.com/anshmajumdar121/loopgate/actions/workflows/trust.yml/badge.svg)](https://github.com/anshmajumdar121/loopgate/actions/workflows/trust.yml)
 
 ![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
