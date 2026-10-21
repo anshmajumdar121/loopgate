@@ -16,6 +16,7 @@ import net from "node:net";
 import WebSocket from "ws";
 import { chromium } from "playwright";
 import { startFakeLlm } from "./fake-llm.mjs";
+import { trustExitCode } from "./trust-exit-code.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKEND = join(HERE, "..", "..");
@@ -251,7 +252,10 @@ async function waitBatch(id, pred, timeoutMs = 240000) {
 }
 
 async function main() {
-  if (!(await preflightChromium())) return 2;
+  if (!(await preflightChromium())) {
+    preflightFailed = true;
+    return 0;
+  }
   console.log(`${C.b}Loop Agent — trust scoreboard${C.x}  ${C.d}(isolated sandbox: ${SBX})${C.x}\n`);
   llm = await startFakeLlm({ port: LLM_PORT, delayMs: 600 });
   await startBackend();
@@ -449,6 +453,7 @@ async function main() {
 }
 
 let failures = 1;
+let preflightFailed = false;
 try {
   failures = await main();
 } catch (e) {
@@ -471,5 +476,5 @@ try {
       console.warn(`warning: sandbox cleanup failed: ${error?.message || error}`);
     }
   }
-  process.exit(failures === 0 ? 0 : failures === 2 ? 2 : 1);
+  process.exit(trustExitCode({ preflightFailed, failures, checksRun: results.length }));
 }
