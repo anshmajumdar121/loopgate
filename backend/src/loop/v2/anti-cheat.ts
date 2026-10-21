@@ -61,22 +61,22 @@ export async function inspectMakerAttempt(
 
   for (const attempted of options.attemptedPaths ?? []) {
     if (isUnsafeRelativePath(attempted)) {
-      reasons.push(`unsafe path write: ${attempted}`);
+      reasons.push(`policy:path-escape:${attempted}`);
     }
   }
 
   for (const entry of after.entries.values()) {
     if (entry.kind === "symlink" && entry.resolvesOutside) {
-      reasons.push(`symlink resolves outside workdir: ${entry.path}`);
+      reasons.push(`policy:path-escape:symlink:${entry.path}`);
     }
   }
 
   for (const change of changes) {
     if (change.kind === "deleted" && isTestFile(change.path)) {
-      reasons.push(`test file deleted or renamed: ${change.path}`);
+      reasons.push(`anti-cheat:test-deleted:${change.path}`);
     }
     if (isSnapshotFile(change.path)) {
-      reasons.push(`snapshot file edited: ${change.path}`);
+      reasons.push(`anti-cheat:snapshot-edited:${change.path}`);
     }
     if (change.after?.kind !== "file") continue;
 
@@ -84,24 +84,24 @@ export async function inspectMakerAttempt(
     const afterText = change.after.content ?? "";
     if (isTestFile(change.path)) {
       if (introducedCheat(beforeText, afterText)) {
-        reasons.push(`test modifier added: ${change.path}`);
+        reasons.push(`anti-cheat:skip-added: test modifier (.skip/.only/.todo) added: ${change.path}`);
       }
       const beforeAssertions = countAssertions(beforeText);
       const afterAssertions = countAssertions(afterText);
       if (afterAssertions < beforeAssertions) {
         reasons.push(
-          `assertion count lowered in test file: ${change.path} (${beforeAssertions} → ${afterAssertions})`,
+          `anti-cheat:assertions-lowered:${change.path} (${beforeAssertions} → ${afterAssertions})`,
         );
       }
       if (introducedTrivialAssertion(beforeText, afterText)) {
-        reasons.push(`trivially-true assertion added: ${change.path}`);
+        reasons.push(`anti-cheat:trivial-assertion: trivially-true assertion added: ${change.path}`);
       }
     }
     if (isTestConfig(change.path)) {
-      reasons.push(`test config edited: ${change.path}`);
+      reasons.push(`anti-cheat:test-policy: test config edited: ${change.path}`);
     }
     if (change.path.replaceAll("\\", "/") === "package.json" && packageTestPolicyChanged(beforeText, afterText)) {
-      reasons.push("package.json test script or coverage threshold edited");
+      reasons.push("anti-cheat:test-policy: package.json test script or coverage threshold edited");
     }
   }
 

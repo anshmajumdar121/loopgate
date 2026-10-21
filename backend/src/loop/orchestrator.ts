@@ -1750,8 +1750,8 @@ try {
           noCheatingPass: false,
           risk: "HIGH",
           criteriaWalk: [],
-          requiredFixes: [structuredResponse.error ?? "malformed verdict"],
-          oneLineReason: structuredResponse.error ?? "malformed verdict",
+          requiredFixes: [`verdict:malformed: ${structuredResponse.error ?? "malformed verdict"}`],
+          oneLineReason: `verdict:malformed: ${structuredResponse.error ?? "malformed verdict"}`,
         };
       }
       if (verdict && verdict.attempt !== attempt) {

@@ -103,7 +103,7 @@ describe("v2 anti-cheat diff policy", () => {
       attemptedPaths: ["../outside.txt", "/tmp/outside.txt", "C:\\temp\\outside.txt"],
     });
     expect(result.clean).toBe(false);
-    expect(result.reasons.filter((reason) => reason.includes("unsafe path"))).toHaveLength(3);
+    expect(result.reasons.filter((reason) => reason.startsWith("policy:path-escape:"))).toHaveLength(3);
   });
 
   it("rejects a symlink that resolves outside the workdir", async () => {

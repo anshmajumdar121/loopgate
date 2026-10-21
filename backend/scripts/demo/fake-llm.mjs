@@ -79,7 +79,7 @@ function reply(mode, role, attempt, userText) {
     if (mode === "trivial_assert") return html + file("tests/trust.test.js", "it('bad', () => expect(true).toBe(true));");
     if (mode === "config_edit") return html + file("tests/trust.test.js", "it('bad', () => expect(1).toBe(1));") + file("vitest.config.ts", "export default { test: { exclude: ['**/*'] } };\n") + file("package.json", '{"scripts":{"test":"vitest run --exclude **/*"},"coverageThreshold":{"lines":0}}');
     if (mode === "real_check_fail") return html + file("fail-check.js", "process.stderr.write('REAL CHECK FAILED'); process.exit(1);");
-    if (mode === "hang_check") return html + file("hang-check.js", "setInterval(() => {}, 60000);");
+    if (mode === "hang_check") return html + file("hang-check.js", "require('node:fs').writeFileSync('hang-check.pid', String(process.pid)); setInterval(() => {}, 60000);");
     if (mode === "prompt_injection" || mode === "path_attack") return file("../outside-loop-trust.txt", "blocked");
     return html;
   }

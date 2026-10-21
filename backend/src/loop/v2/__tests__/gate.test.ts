@@ -51,7 +51,7 @@ describe("v2 code-level approval gate", () => {
     const failed = { ...scopeCheck, passed: false, reason: "changed files outside plan" };
     const decision = evaluateApprovalGate(input({ checks: [fileCheck, failed] }));
     expect(decision.outcome).toBe("REJECT");
-    expect(decision.requiredFixes.join("\n")).toContain("changed files outside plan");
+    expect(decision.requiredFixes.join("\n")).toContain("gate:check-failed:scope");
   });
 
   it("rejects anti-cheat and write-policy violations", () => {
@@ -70,14 +70,14 @@ describe("v2 code-level approval gate", () => {
       input({ runtime: { required: true, available: false, passed: false } }),
     );
     expect(decision.outcome).toBe("REJECT");
-    expect(decision.requiredFixes).toContain("runtime check unavailable");
+    expect(decision.requiredFixes.some((reason) => reason.startsWith("gate:runtime-unavailable"))).toBe(true);
   });
 
   it("rejects missing or non-passing evidence references", () => {
     const missing = evaluateApprovalGate(
       input({ verifier: { ...approve, criteria: [] } }),
     );
-    expect(missing.reasons.join("\n")).toContain("has no verifier evidence");
+    expect(missing.reasons.some((reason) => reason.startsWith("gate:evidence-missing:c1"))).toBe(true);
 
     const badCheck = evaluateApprovalGate(
       input({
@@ -88,7 +88,7 @@ describe("v2 code-level approval gate", () => {
         },
       }),
     );
-    expect(badCheck.reasons.join("\n")).toContain("cites a check that did not pass");
+    expect(badCheck.reasons.some((reason) => reason.startsWith("gate:evidence-missing:check:missing"))).toBe(true);
   });
 
   it("maps REJECT and ESCALATE verifier outcomes to a fail-closed REJECT", () => {
