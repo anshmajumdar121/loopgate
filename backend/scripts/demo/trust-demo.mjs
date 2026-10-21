@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import http from "node:http";
 import net from "node:net";
 import WebSocket from "ws";
+import { chromium } from "playwright";
 import { startFakeLlm } from "./fake-llm.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -69,6 +70,17 @@ async function startBackend({ playwrightBrowsersPath } = {}) {
   backend.stderr.on("data", (d) => backend.log.push(String(d)));
   return waitHealthy();
 }
+async function preflightChromium() {
+  try {
+    const browser = await chromium.launch({ headless: true });
+    await browser.close();
+    return true;
+  } catch {
+    console.error("Chromium missing - run: cd backend && npx playwright install --only-shell chromium");
+    return false;
+  }
+}
+
 async function waitHealthy(ms = 30000) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
@@ -205,6 +217,7 @@ async function waitBatch(id, pred, timeoutMs = 240000) {
 }
 
 async function main() {
+  if (!(await preflightChromium())) return 2;
   console.log(`${C.b}Loop Agent — trust scoreboard${C.x}  ${C.d}(isolated sandbox: ${SBX})${C.x}\n`);
   llm = await startFakeLlm({ port: LLM_PORT, delayMs: 600 });
   await startBackend();
@@ -274,24 +287,24 @@ async function main() {
 
   // ── Trust model ──────────────────────────────────────────────────────
   await check("Happy path: plan → make → verify → approved", ["happy", "loop"], async () => {
-    const { task } = await runTask("happy", "Build a hello page");
+    const { task } = await runTask("happy", "Build a hello page", { stopWhen: terminalOrVerdict });
     return [task.status === "done", `status ${task.status}, verdict ${task.verdict?.outcome}`];
   });
   await check("\"REJECT — cannot approve\" is NOT treated as approval", ["verdict", "trust"], async () => {
-    const { task } = await runTask("reject_phrase", "Build a hello page", { stopWhen: (t) => !!t.verdict });
+    const { task } = await runTask("reject_phrase", "Build a hello page", { stopWhen: terminalOrVerdict });
     return [task.status !== "done" && task.verdict?.outcome === "REJECT", `status ${task.status}, verdict ${task.verdict?.outcome}`];
   });
   await check("Contradictory APPROVE (Scope: FAIL) is downgraded to REJECT", ["gate", "trust"], async () => {
-    const { task } = await runTask("contradiction", "Build a hello page", { stopWhen: (t) => !!t.verdict });
+    const { task } = await runTask("contradiction", "Build a hello page", { stopWhen: terminalOrVerdict });
     return [task.verdict?.outcome === "REJECT" && task.status !== "done", `verdict ${task.verdict?.outcome}: ${task.verdict?.requiredFixes?.[0] ?? ""}`.slice(0, 120)];
   });
   await check("Maker cannot forge the verifier's verdict", ["forge", "trust"], async () => {
-    const { task, wd } = await runTask("forge_verdict", "Build a hello page");
+    const { task, wd } = await runTask("forge_verdict", "Build a hello page", { stopWhen: terminalOrVerdict });
     const state = existsSync(join(wd, "STATE.md")) ? readFileSync(join(wd, "STATE.md"), "utf8") : "";
     return [task.status !== "done", `status ${task.status}; STATE.md write ${/Blocked writes.*STATE\.md/.test(state) ? "blocked" : "not blocked"}`];
   });
   await check("Denylisted / unplanned writes are blocked (.env, package.json, auth/**)", ["denylist", "trust"], async () => {
-    const { wd } = await runTask("denylist", "Build a hello page");
+    const { wd } = await runTask("denylist", "Build a hello page", { stopWhen: terminalOrVerdict });
     const leaked = [".env", "package.json", "auth/login.ts"].filter((f) => existsSync(join(wd, f)));
     return [leaked.length === 0 && existsSync(join(wd, "index.html")), leaked.length ? `LEAKED: ${leaked.join(", ")}` : "only index.html written"];
   });
@@ -329,7 +342,7 @@ async function main() {
     return [task.status !== "done" && missing && !injectedPassed && !existsSync(join(wd, "index.html")), `status ${task.status}; missing index.html: ${missing}; injected criterion passed: ${injectedPassed}`];
   });
   await check("A hanging declared check is killed and rejected", ["hang", "timeout", "trust"], async () => {
-    const { task, wd, elapsedMs } = await runTask("hang_check", "Build a hello page", { maxAttempts: 1, timeoutMs: 30000, stopWhen: terminalOrVerdict });
+    const { task, wd, elapsedMs } = await runTask("hang_check", "Build a hello page", { maxAttempts: 1, timeoutMs: 10_000, stopWhen: terminalOrVerdict });
     const timeoutReason = requiredFixes(task).find((entry) => entry.startsWith("gate:check-timeout:hang_check")) || "";
     const pidPath = join(wd, "hang-check.pid");
     const pid = existsSync(pidPath) ? Number(readFileSync(pidPath, "utf8")) : 0;
@@ -406,5 +419,5 @@ try {
   try { await killBackendHard(); } catch {}
   llm?.close();
   if (!process.env.DEMO_KEEP) rmSync(SBX, { recursive: true, force: true });
-  process.exit(failures === 0 ? 0 : 1);
+  process.exit(failures === 0 ? 0 : failures === 2 ? 2 : 1);
 }
