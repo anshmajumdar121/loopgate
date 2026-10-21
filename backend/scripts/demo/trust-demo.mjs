@@ -19,7 +19,6 @@ import { startFakeLlm } from "./fake-llm.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKEND = join(HERE, "..", "..");
-const TSX = join(BACKEND, "node_modules", "tsx", "dist", "cli.mjs");
 let PORT = Number(process.env.DEMO_PORT || 0);
 const LLM_PORT = Number(process.env.DEMO_LLM_PORT || 0);
 let B = "";
@@ -51,6 +50,7 @@ async function startBackend({ playwrightBrowsersPath } = {}) {
     PORT: String(PORT),
     LOOP_HOST: "127.0.0.1",
     LOOP_DATA_DIR: join(SBX, "data", "tasks"),
+    LOOP_EVENT_LOG_PATH: join(SBX, "data", "loop-events.sqlite"),
     LOOP_WORKSPACES_ROOT: join(SBX, "ws"),
     LOOP_WORKDIR: join(SBX, "work"),
     LOOP_PREVIEW_PORT: String(PORT + 80),
@@ -60,10 +60,10 @@ async function startBackend({ playwrightBrowsersPath } = {}) {
   if (playwrightBrowsersPath !== undefined) {
     backendEnv.PLAYWRIGHT_BROWSERS_PATH = playwrightBrowsersPath;
   }
-  backend = spawn(process.execPath, [TSX, "src/index.ts"], {
+  backend = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
     cwd: BACKEND,
     env: backendEnv,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   backend.log = [];
   backend.stdout.on("data", (d) => backend.log.push(String(d)));
@@ -97,12 +97,34 @@ async function alive() {
   }
 }
 function killBackendHard() {
-  if (!backend || backend.exitCode !== null) return Promise.resolve();
+  if (!backend || backend.exitCode !== null || backend.signalCode !== null) return Promise.resolve();
   return new Promise((res) => {
     backend.once("exit", res);
     if (process.platform === "win32") spawn("taskkill", ["/pid", String(backend.pid), "/T", "/F"]);
     else backend.kill("SIGKILL");
   });
+}
+async function stopBackendGracefully() {
+  const child = backend;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      error ? reject(error) : resolve();
+    };
+    const onExit = (code, signal) => finish(code === 0 ? null : new Error(`backend shutdown exited ${code} (${signal})`));
+    const timer = setTimeout(() => finish(new Error("backend graceful shutdown timed out")), 15_000);
+    child.once("exit", onExit);
+    child.send({ type: "shutdown" }, (error) => { if (error) finish(error); });
+  });
+}
+async function assertDemoConnection() {
+  const id = model.split(":")[1];
+  const response = await api("GET", `/api/connections/${id}`);
+  if (response.status !== 200 || response.d.connection?.id !== id) {
+    throw new Error(`demo connection ${id} missing after restart`);
+  }
 }
 function terminalOrVerdict(task) {
   return Boolean(task?.verdict) || ["done", "escalated", "cancelled"].includes(task?.status);
@@ -372,14 +394,16 @@ async function main() {
   await check("Runtime check unavailable on a page task fails closed", ["runtime", "chromium", "trust"], async () => {
     const emptyBrowsers = mkdtempSync(join(tmpdir(), "loop-empty-browsers-"));
     try {
-      await killBackendHard();
+      await stopBackendGracefully();
       await startBackend({ playwrightBrowsersPath: emptyBrowsers });
+      await assertDemoConnection();
       const { task } = await runTask("runtime_unavailable", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });
       const reason = requiredFixes(task).find((entry) => entry.startsWith("gate:runtime-unavailable")) || "";
       return [task.status !== "done" && hasReason(task, "gate:runtime-unavailable"), `status ${task.status}; ${reason}`];
     } finally {
-      await killBackendHard();
+      await stopBackendGracefully();
       await startBackend();
+      await assertDemoConnection();
       try {
         rmSync(emptyBrowsers, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
       } catch (error) {

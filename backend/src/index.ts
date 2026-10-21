@@ -25,6 +25,7 @@ import {
   loadAllTokenUsage,
   recoverFromRestart,
   saveTask,
+  flushConnectionSaves,
   TASK_DATA_DIR,
   isActiveStatus,
 } from "./store/persistence.js";
@@ -52,8 +53,14 @@ import { createStaticUi } from "./http/staticUi.js";
 import { resolve as pathResolve } from "node:path";
 
 const app = new Hono();
+let ready = false;
 
-app.get("/health", (c) => c.json({ status: "ok", uptime: process.uptime() }));
+app.get("/health", (c) => c.json({ status: ready ? "ok" : "starting", uptime: process.uptime() }, ready ? 200 : 503));
+// Never let a mutation race disk hydration and then be overwritten by it.
+app.use("/api/*", async (c, next) => {
+  if (!ready) return c.json({ error: "backend is starting" }, 503);
+  await next();
+});
 app.route("/api", tasksApi);
 app.route("/api", projectsApi);
 app.route("/api", sessionsApi);
@@ -138,6 +145,8 @@ broadcaster.attach(wss);
 // signal first, then closes loop resources and servers without leaving child
 // agents or health-check timers behind on SIGINT/SIGTERM.
 export const shutdownCoordinator = new ShutdownCoordinator();
+// Handlers execute in reverse registration order: flush after producers stop.
+shutdownCoordinator.register(() => flushConnectionSaves());
 shutdownCoordinator.register(() => stopAllLoops());
 shutdownCoordinator.register(() => closeEngineResources());
 shutdownCoordinator.register(() => stopConnectionHealthMonitor());
@@ -178,11 +187,28 @@ shutdownCoordinator.register(
 installShutdownHandlers(shutdownCoordinator, {
   onError: (error) => console.error("[loop-agent-backend] shutdown failed:", error),
 });
+// Only a parent that spawned this process with IPC can request this. Windows
+// child.kill("SIGTERM") is forceful, so the isolated demo uses IPC instead.
+if (process.send) {
+  process.on("message", (message) => {
+    if (!message || typeof message !== "object" || !("type" in message) || message.type !== "shutdown") return;
+    ready = false;
+    void shutdownCoordinator.shutdown("parent-request").then(
+      () => process.exit(0),
+      (error) => {
+        console.error("[loop-agent-backend] shutdown failed:", error);
+        process.exit(1);
+      },
+    );
+  });
+}
 
 httpServer.listen(PORT, HOST, async () => {
   const shownHost = HOST.includes(":") ? `[${HOST}]` : HOST;
-  console.log(`[loop-agent-backend] listening on http://${shownHost}:${PORT}`);
-  console.log(`[loop-agent-backend] ws at ws://${shownHost}:${PORT}/ws`);
+  const address = httpServer.address();
+  const boundPort = address && typeof address === "object" ? address.port : PORT;
+  console.log(`[loop-agent-backend] listening on http://${shownHost}:${boundPort}`);
+  console.log(`[loop-agent-backend] ws at ws://${shownHost}:${boundPort}/ws`);
   console.log(
     `[loop-agent-backend] allowed hosts/origins: ${[...ALLOWED_HOSTS].join(", ")}; max body ${MAX_BODY_BYTES} bytes`
   );
@@ -240,6 +266,7 @@ httpServer.listen(PORT, HOST, async () => {
           (resumedBatches.length > 0 ? `, resuming ${resumedBatches.length} interrupted` : "")
       );
     }
+    ready = true;
   } catch (err) {
     console.error(`[loop-agent-backend] Failed to load persisted tasks:`, err);
   }

@@ -24,6 +24,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Project, Session, Connection, Task, TaskStatus } from "../types.js";
 import type { TokenUsageEntry } from "./tokenUsage.js";
 
@@ -332,6 +333,11 @@ export async function saveSessions(sessions: Session[]): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CONNECTIONS_FILE = resolve(DATA_ROOT, "_connections.json");
+// Full snapshots must commit in call order. Unique temp names alone prevent
+// collisions, but still allow an older write to rename over a newer snapshot.
+let connectionSaveChain: Promise<void> = Promise.resolve();
+const CONNECTION_RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160] as const;
+const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 /**
  * Load all connections from disk. Returns [] when the file is missing or
@@ -362,10 +368,67 @@ export async function loadAllConnections(): Promise<Connection[]> {
 export async function saveConnections(
   connections: Connection[]
 ): Promise<void> {
+  // Snapshot before the first await: callers mutate both the shared array and
+  // nested health/model records while disk I/O is pending.
+  const content = JSON.stringify(connections, null, 2);
+  const next = connectionSaveChain
+    .catch(() => {
+      /* a failed save must not block the next complete snapshot */
+    })
+    .then(() => writeConnectionSnapshot(content));
+  connectionSaveChain = next;
+  return next;
+}
+
+/**
+ * Drain connection saves, including saves queued while draining. Stop mutation
+ * producers (HTTP requests and health checks) before awaiting this at shutdown.
+ * The latest failed save remains observable here even if its caller caught it;
+ * a later successful full snapshot supersedes that failure.
+ */
+export async function flushConnectionSaves(): Promise<void> {
+  for (;;) {
+    const tail = connectionSaveChain;
+    try {
+      await tail;
+    } catch (err) {
+      if (tail === connectionSaveChain) throw err;
+      // A newer full snapshot is queued; wait for its outcome instead.
+      continue;
+    }
+    if (tail === connectionSaveChain) return;
+  }
+}
+
+async function writeConnectionSnapshot(content: string): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
   const tmp = uniqueTmpPath(CONNECTIONS_FILE);
-  await writeFile(tmp, JSON.stringify(connections, null, 2), "utf8");
-  await rename(tmp, CONNECTIONS_FILE);
+  try {
+    await writeFile(tmp, content, "utf8");
+    // Windows readers/AV can temporarily deny replacement. Retry the rename
+    // itself, never unlink the destination: it must stay valid until commit.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await rename(tmp, CONNECTIONS_FILE);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          !code ||
+          !RETRYABLE_RENAME_CODES.has(code) ||
+          attempt >= CONNECTION_RENAME_RETRY_DELAYS_MS.length
+        ) {
+          throw err;
+        }
+        await delay(CONNECTION_RENAME_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  } catch (err) {
+    // Remove only this failed attempt's temp file, preserving the original
+    // error and the last committed destination even if cleanup also fails.
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
