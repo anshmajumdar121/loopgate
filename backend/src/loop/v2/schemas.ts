@@ -17,6 +17,7 @@ export function isAllowedCheckCommand(command: readonly string[]): boolean {
   if (verb === "run" && (SCRIPT_NAMES as readonly string[]).includes(third ?? "")) {
     return true;
   }
+  if (tool === "node" && !verb.startsWith("-")) return true;
   if (verb === "tsc" || verb === "vitest") return true;
   // `npx vitest run` is the common direct invocation; accepting `node
   // vitest` would be misleading, so keep the allowlist anchored to the

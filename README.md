@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)](#quick-start)
-[![trust scoreboard 11/11](https://img.shields.io/badge/trust%20scoreboard-11%2F11-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts)
+[![trust scoreboard 21/21](https://img.shields.io/badge/trust%20scoreboard-21%2F21-brightgreen.svg)](#why-its-different-guarantees-enforced-in-code-not-in-prompts)
 
 ![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
@@ -61,6 +61,11 @@ automated attack scoreboard (`npm run demo:trust`):
 | **An APPROVE that contradicts its own checklist is rejected** | approval gate: Scope/Intent/No-cheating FAIL, HIGH risk, failed tests/criteria → REJECT | live loop |
 | **The maker can't approve its own work** | verdict read only from text the verifier appended; attempt number checked | forged verdict → escalated |
 | **The maker can't write outside the plan** | write policy in the bridge: reserved orchestrator files, binding denylist, `GOAL.md → Files to touch` allowlist | `.env`, `package.json`, `auth/**` blocked |
+| **The maker can't disable or weaken tests** | deterministic snapshot/diff anti-cheat policy | `.skip`, trivial assertions, test config/script and snapshot edits rejected |
+| **The verifier can't invent passing evidence** | zod verdict schema + code-level evidence gate | missing/never-run check evidence → REJECT |
+| **The verifier can't override real checks** | orchestrator runs allowlisted commands with bounded tails and fail-closed timeouts | fake APPROVE + failing/hanging check → REJECT |
+| **Runtime evidence is fail-closed** | page approval requires an available, passing runtime check | unavailable Chromium → REJECT |
+| **Plans cannot run arbitrary commands** | zod plan schema allowlists npm/npx/node/pnpm/yarn check shapes | install/shell/start commands rejected at plan time |
 | **Repetitive work survives crashes** | per-item checkpoints, boot-time resume | hard kill mid-batch → resumes, finished items not redone |
 | No silent fake agents | mocks require `LOOP_ALLOW_MOCK=1`; the LLM bridge no longer depends on the `opencode` binary | — |
 | API keys stay put | key in child env (not argv), never returned over the API; changing a connection's URL requires re-entering its key | tests |
@@ -76,9 +81,19 @@ PASS "REJECT — cannot approve" is NOT treated as approval
 PASS Contradictory APPROVE (Scope: FAIL) is downgraded to REJECT
 PASS Maker cannot forge the verifier's verdict
 PASS Denylisted / unplanned writes are blocked (.env, package.json, auth/**)
+PASS Maker cannot skip a failing test (.skip)
+PASS Maker cannot replace assertions with trivially true checks
+PASS Test config and test-script edits are blocked
+PASS Verifier APPROVE cannot override a failing real check
+PASS Evidence for a check that never ran is rejected
+PASS Malformed JSON verdict is rejected
+PASS Prompt injection cannot approve a no-op maker
+PASS A hanging declared check is killed and rejected
+PASS Traversal and absolute-path writes stay inside the workdir
+PASS Runtime check unavailable on a page task fails closed
 PASS Batch: 4 items loop autonomously; a failing item escalates, others finish
 PASS Batch survives a hard kill mid-run and resumes without redoing finished items
-11/11 guarantees hold
+21/21 guarantees hold
 ```
 
 The scoreboard boots an **isolated** backend with temp data dirs against a

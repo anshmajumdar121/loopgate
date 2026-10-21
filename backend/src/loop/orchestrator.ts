@@ -69,7 +69,7 @@ import { getV2EventLog } from "./v2/engine.js";
 import { runDeterministicChecks, type DeterministicCheckResult } from "./v2/checks.js";
 import { inspectMakerAttempt, snapshotWorkdir, type AntiCheatResult, type WorkdirSnapshot } from "./v2/anti-cheat.js";
 import { evaluateApprovalGate, canUseScriptThreshold, type ApprovalGateDecision } from "./v2/gate.js";
-import { parseStructuredVerdict, type PlanSchema, type VerdictSchema } from "./v2/schemas.js";
+import { parseStructuredVerdict, PlanSchema, type PlanSchema as PlanSchemaType, type VerdictSchema } from "./v2/schemas.js";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { isPublicDemo } from "../demo/publicDemo.js";
@@ -714,7 +714,7 @@ try {
     let currentGoalContent = "";
     let currentAdjustments = "";
     let planAdjustCount = 0;
-    let structuredPlan: PlanSchema | null = null;
+    let structuredPlan: PlanSchemaType | null = null;
 
     while (true) {
       if (skipPlanning) {
@@ -1433,7 +1433,10 @@ try {
         // The verifier gets this evidence verbatim; a broken page can no
         // longer be APPROVEd on source-reading alone. `runtime` is reused
         // below by the verifier-prompt builder and the REJECT-feedback path.
-        try {
+        if (/\[force-runtime-unavailable\]/i.test(initialTask.prompt)) {
+          runtimeUnavailableReason = "runtime check unavailable";
+          log("orchestrator", "stderr", "runtime check intentionally unavailable for this fail-closed demo task");
+        } else try {
           runtimeStartMs = Date.now();
           // Snapshot the bind counter before/after so we can detect a
           // self-healing restart and tell the user the preview link
@@ -2821,8 +2824,8 @@ async function buildVerifierPrompt(
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function buildStructuredPlan(plan: PlanSummary, workdir: string): Promise<PlanSchema> {
-  const checks: PlanSchema["checks"] = [];
+async function buildStructuredPlan(plan: PlanSummary, workdir: string): Promise<PlanSchemaType> {
+  const checks: PlanSchemaType["checks"] = parseDeclaredChecks(plan.rawGoal);
   try {
     const packageJson = JSON.parse(await readFile(pathResolve(workdir, "package.json"), "utf8")) as {
       scripts?: Record<string, unknown>;
@@ -2835,11 +2838,22 @@ async function buildStructuredPlan(plan: PlanSummary, workdir: string): Promise<
   } catch {
     // Static workdirs have no package scripts; built-in file/scope checks still run.
   }
-  return {
+  return PlanSchema.parse({
     criteria: plan.criteria.map((text, index) => ({ id: `criterion-${index + 1}`, text })),
     filesToTouch: [...plan.filesToTouch],
     checks,
-  } satisfies PlanSchema;
+  });
+}
+
+function parseDeclaredChecks(rawGoal: string): PlanSchemaType["checks"] {
+  const checks: PlanSchemaType["checks"] = [];
+  for (const line of rawGoal.split(/\r?\n/)) {
+    const match = line.match(/^\s*-\s*check\s+([^:]+):\s*(.*?)\s*\|\s*(\d+)\s*$/i);
+    if (!match) continue;
+    const command = match[2].trim().split(/\s+/).filter(Boolean);
+    checks.push({ id: match[1].trim(), cmd: command, timeoutMs: Number(match[3]) });
+  }
+  return checks;
 }
 
 function safeGetV2EventLog() {
@@ -2861,7 +2875,7 @@ function extractBlockedWritePaths(state: string): string[] {
 
 function legacyVerdictFromStructured(
   structured: VerdictSchema,
-  plan: PlanSchema | null,
+  plan: PlanSchemaType | null,
 ): { verdict: import("../types.js").Verdict } {
   const criteriaWalk = (plan?.criteria ?? []).map((criterion) => {
     const item = structured.criteria.find((candidate) => candidate.id === criterion.id);
@@ -2896,7 +2910,7 @@ function legacyVerdictFromStructured(
 
 function structuredVerdictFromLegacy(
   verdict: import("../types.js").Verdict,
-  plan: PlanSchema,
+  plan: PlanSchemaType,
 ): VerdictSchema {
   return {
     attempt: verdict.attempt,
