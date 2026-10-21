@@ -237,8 +237,11 @@ export async function runProcess(options: ProcessRunOptions): Promise<ProcessRun
     stdout: "pipe",
     stderr: "pipe",
     reject: false,
-    timeout: timeoutMs ?? 0,
-    cancelSignal: options.signal ?? options.cancelSignal,
+    // On Windows the runner owns timeout and cancellation: if Execa killed
+    // the direct child first, taskkill /T could no longer reach the orphaned
+    // grandchildren, which keep the output pipes open and hang the run.
+    timeout: process.platform === "win32" ? 0 : timeoutMs ?? 0,
+    cancelSignal: process.platform === "win32" ? undefined : options.signal ?? options.cancelSignal,
     forceKillAfterDelay,
     detached: process.platform !== "win32",
     windowsHide: true,
