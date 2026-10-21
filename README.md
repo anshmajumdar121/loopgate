@@ -52,23 +52,30 @@ and then hope. We audited this project's original loop and broke every one of
 those promises. Each guarantee below is now enforced in code and proven by an
 automated attack scoreboard (`npm run demo:trust`):
 
-| Guarantee | How it's enforced | Proof |
+| Guarantee | How it's enforced | Machine proof |
 |---|---|---|
-| One malformed request can't kill the server | crash boundary + process guards (`src/http/`) | `GET //[` → 400, server stays up |
-| No unbounded memory from requests | 10 MB body cap, 1 MB WS frames, 200-client cap | 20 MB POST → 413 |
-| No LAN / DNS-rebinding / cross-site access | 127.0.0.1 bind, Host + Origin allowlist, WS `verifyClient` | foreign Host → 421, cross-origin WS → 403 |
-| **"REJECT — cannot approve" is never an approval** | strict verdict parser: only the leading keyword counts, unknown → REJECT | live loop ends REJECT, not DONE |
-| **An APPROVE that contradicts its own checklist is rejected** | approval gate: Scope/Intent/No-cheating FAIL, HIGH risk, failed tests/criteria → REJECT | live loop |
-| **The maker can't approve its own work** | verdict read only from text the verifier appended; attempt number checked | forged verdict → escalated |
-| **The maker can't write outside the plan** | write policy in the bridge: reserved orchestrator files, binding denylist, `GOAL.md → Files to touch` allowlist | `.env`, `package.json`, `auth/**` blocked |
-| **The maker can't disable or weaken tests** | deterministic snapshot/diff anti-cheat policy | `.skip`, trivial assertions, test config/script and snapshot edits rejected |
-| **The verifier can't invent passing evidence** | zod verdict schema + code-level evidence gate | missing/never-run check evidence → REJECT |
-| **The verifier can't override real checks** | orchestrator runs allowlisted commands with bounded tails and fail-closed timeouts | fake APPROVE + failing/hanging check → REJECT |
-| **Runtime evidence is fail-closed** | page approval requires an available, passing runtime check | unavailable Chromium → REJECT |
-| **Plans cannot run arbitrary commands** | zod plan schema allowlists npm/npx/node/pnpm/yarn check shapes | install/shell/start commands rejected at plan time |
-| **Repetitive work survives crashes** | per-item checkpoints, boot-time resume | hard kill mid-batch → resumes, finished items not redone |
-| No silent fake agents | mocks require `LOOP_ALLOW_MOCK=1`; the LLM bridge no longer depends on the `opencode` binary | — |
-| API keys stay put | key in child env (not argv), never returned over the API; changing a connection's URL requires re-entering its key | tests |
+| One malformed request can't kill the server | crash boundary + process guards (`src/http/`) | `http:400` + health remains true |
+| No unbounded memory from requests | 10 MB body cap, 1 MB WS frames, 200-client cap | `http:413` for the 20 MB POST |
+| No LAN / DNS-rebinding access | 127.0.0.1 bind and Host allowlist | `http:421` |
+| No cross-site WebSocket access | WS `verifyClient` origin allowlist | `ws:403` |
+| Happy path reaches approval | plan → make → deterministic checks → runtime → verifier gate | `verdict:APPROVE` + task `done` |
+| **“REJECT — cannot approve” is never an approval** | strict verdict parser: only the leading keyword counts, unknown → REJECT | `verdict:REJECT` + task not `done` |
+| **An APPROVE that contradicts its own checklist is rejected** | approval gate rejects Scope/Intent/No-cheating FAIL and HIGH risk | `Approval gate blocked APPROVE:` |
+| **The maker can't approve its own work** | verdict is read only from text appended by the verifier | verifier-owned verdict + blocked `STATE.md` write |
+| **The maker can't write outside the plan** | reserved files, denylist, and `GOAL.md → Files to touch` allowlist | blocked-write policy evidence |
+| Maker cannot skip a failing test (`.skip`/`.only`) | modifier additions are rejected in changed test files | `anti-cheat:skip-added` |
+| Maker cannot replace assertions with trivially true checks | trivial assertion additions are rejected | `anti-cheat:trivial-assertion` |
+| Test config and test-script edits are blocked | test config and package test-policy diffs are rejected | `anti-cheat:test-policy` |
+| **The verifier can't invent passing evidence** | criteria evidence must cite a passing deterministic check or existing file | `gate:evidence-missing:<id>` |
+| **The verifier can't override real checks** | allowlisted commands run with bounded tails and fail-closed results | `gate:check-failed:<id>` / `gate:check-timeout:<id>` |
+| Malformed JSON verdicts fail closed | fenced JSON is schema-validated before approval | `verdict:malformed` |
+| Prompt injection cannot approve a no-op maker | required files and criterion evidence are checked independently | `gate:file-missing:index.html` and no injected criterion pass |
+| Hanging declared checks are killed | structured process runner enforces declared timeouts | `gate:check-timeout:<id>` + no child remains |
+| Traversal and absolute-path writes stay inside the workdir | path and symlink containment is enforced before approval | `policy:path-escape` |
+| **Runtime evidence is fail-closed** | page approval requires an available, passing Chromium runtime check | `gate:runtime-unavailable` / `gate:runtime-failed` |
+| **Repetitive work survives crashes** | per-item checkpoints and boot-time resume | batch items finish with one failing item escalated |
+| Finished batch items are not redone after restart | checkpointed resume starts from unfinished items | resume proof: first item planner call count unchanged |
+
 
 ```
 $ cd backend && npm run demo:trust
@@ -98,6 +105,21 @@ PASS Batch survives a hard kill mid-run and resumes without redoing finished ite
 
 The scoreboard boots an **isolated** backend with temp data dirs against a
 deterministic fake LLM. It never touches your data and makes no paid API calls.
+Before any check it verifies that Playwright Chromium can launch. If Chromium is
+not installed, it exits 2 without running the scoreboard and prints:
+`Chromium missing - run: cd backend && npx playwright install --only-shell chromium`.
+
+To prove the reasons are load-bearing, run:
+
+```bash
+cd backend && npm run demo:trust:mutation
+# 10/10 defences are load-bearing
+```
+
+The mutation harness disables one defence at a time using
+`LOOP_TEST_DISABLE_DEFENCE=<rule>`. That flag is ignored unless
+`LOOP_ALLOW_MOCK=1` is also set; it is a test-only proof hook, not a production
+configuration switch.
 
 ## Quick start
 
