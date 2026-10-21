@@ -336,8 +336,8 @@ async function main() {
   });
   await check("Verifier APPROVE cannot override a failing real check", ["real-check", "gate", "trust"], async () => {
     const { task } = await runTask("real_check_fail", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });
-    const reason = requiredFixes(task).find((entry) => entry.startsWith("gate:check-failed:real_check_fail")) || "";
-    return [task.status !== "done" && /gate:check-failed:real_check_fail/.test(reason) && /exit 1/.test(reason), `status ${task.status}; ${reason}`];
+    const reason = requiredFixes(task).find((entry) => entry.startsWith("gate:check-failed:real_check_fail: exit 1")) || "";
+    return [task.status !== "done" && reason.startsWith("gate:check-failed:real_check_fail: exit 1"), `status ${task.status}; ${reason}`];
   });
   await check("Evidence for a check that never ran is rejected", ["evidence", "gate", "trust"], async () => {
     const { task } = await runTask("evidence_never_run", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });
