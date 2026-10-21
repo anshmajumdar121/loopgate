@@ -19,16 +19,32 @@ import { startFakeLlm } from "./fake-llm.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKEND = join(HERE, "..", "..");
 const TSX = join(BACKEND, "node_modules", "tsx", "dist", "cli.mjs");
-const PORT = Number(process.env.DEMO_PORT || 3110);
-const LLM_PORT = Number(process.env.DEMO_LLM_PORT || 4011);
-const B = `http://127.0.0.1:${PORT}`;
+let PORT = Number(process.env.DEMO_PORT || 0);
+const LLM_PORT = Number(process.env.DEMO_LLM_PORT || 0);
+let B = "";
 const SBX = mkdtempSync(join(tmpdir(), "loop-trust-demo-"));
 const filter = process.argv.slice(2).map((s) => s.toLowerCase());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const C = { g: "\x1b[32m", r: "\x1b[31m", y: "\x1b[33m", d: "\x1b[2m", b: "\x1b[1m", x: "\x1b[0m" };
 
 let backend;
-function startBackend() {
+async function freePort() {
+  return await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+async function startBackend() {
+  // Pick an ephemeral loopback port by default so a stale dev server cannot
+  // make this isolated demo fail before the first scoreboard check. An
+  // explicit DEMO_PORT still wins for callers that need a stable port.
+  if (!PORT) PORT = await freePort();
+  B = `http://127.0.0.1:${PORT}`;
   backend = spawn(process.execPath, [TSX, "src/index.ts"], {
     cwd: BACKEND,
     env: {
