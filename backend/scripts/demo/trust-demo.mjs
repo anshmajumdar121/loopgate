@@ -120,6 +120,18 @@ function hasPassedInjectedCriterion(task) {
     )
   );
 }
+function checkResult(task, id) {
+  for (const entry of task?.logs ?? []) {
+    const text = typeof entry?.text === "string" ? entry.text : "";
+    if (!text.startsWith("CHECK_RESULT ")) continue;
+    try {
+      const result = JSON.parse(text.slice("CHECK_RESULT ".length));
+      if (result?.id === id) return result;
+    } catch {}
+  }
+  return null;
+}
+
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -342,13 +354,15 @@ async function main() {
     return [task.status !== "done" && missing && !injectedPassed && !existsSync(join(wd, "index.html")), `status ${task.status}; missing index.html: ${missing}; injected criterion passed: ${injectedPassed}`];
   });
   await check("A hanging declared check is killed and rejected", ["hang", "timeout", "trust"], async () => {
-    const { task, wd, elapsedMs } = await runTask("hang_check", "Build a hello page", { maxAttempts: 1, timeoutMs: 10_000, stopWhen: terminalOrVerdict });
+    const { task, wd } = await runTask("hang_check", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });
     const timeoutReason = requiredFixes(task).find((entry) => entry.startsWith("gate:check-timeout:hang_check")) || "";
+    const result = checkResult(task, "hang_check");
     const pidPath = join(wd, "hang-check.pid");
     const pid = existsSync(pidPath) ? Number(readFileSync(pidPath, "utf8")) : 0;
     const alive = processAlive(pid);
     if (alive) stopProcess(pid);
-    return [task.status !== "done" && /gate:check-timeout:hang_check/.test(timeoutReason) && /timed out/i.test(timeoutReason) && elapsedMs <= 10_250 && !alive, `status ${task.status}; ${timeoutReason}; elapsed ${elapsedMs}ms; process alive: ${alive}`];
+    const durationOk = Boolean(result) && result.timedOut === true && result.durationMs <= result.timeoutMs + 2_000;
+    return [task.status !== "done" && timeoutReason.startsWith("gate:check-timeout:hang_check") && durationOk && !alive, `status ${task.status}; ${timeoutReason}; check duration ${result?.durationMs ?? "missing"}ms / timeout ${result?.timeoutMs ?? "missing"}ms; process alive: ${alive}`];
   });
   await check("Traversal and absolute-path writes stay inside the workdir", ["path", "traversal", "trust"], async () => {
     const { task, wd } = await runTask("path_attack", "Build a hello page", { maxAttempts: 1, stopWhen: terminalOrVerdict });

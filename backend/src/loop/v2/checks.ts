@@ -22,6 +22,8 @@ export interface DeterministicCheckResult {
   cmd?: string[];
   exitCode?: number;
   timedOut?: boolean;
+  timeoutMs?: number;
+  durationMs?: number;
   outputTail?: string;
   reason?: string;
 }
@@ -129,13 +131,14 @@ async function runDeclaredCheck(
 ): Promise<DeterministicCheckResult> {
   const args = [...command];
   const executable = normalizeExecutable(args.shift()!);
+  const startedAt = Date.now();
   let result: ProcessRunResult;
   try {
     result = await runProcess({
       executable,
       args,
       cwd: options.workdir,
-      timeoutMs: isDefenceDisabled("check-timeout") ? 0 : timeoutMs,
+      timeoutMs,
       stdoutTailBytes: options.stdoutTailBytes ?? DEFAULT_TAIL_BYTES,
       stderrTailBytes: options.stderrTailBytes ?? DEFAULT_TAIL_BYTES,
     });
@@ -146,6 +149,8 @@ async function runDeclaredCheck(
       ref: `check:${id}`,
       passed: false,
       cmd: [...command],
+      timeoutMs,
+      durationMs: Date.now() - startedAt,
       reason: `check crashed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
@@ -163,6 +168,8 @@ async function runDeclaredCheck(
     cmd: [...command],
     exitCode: result.exitCode,
     timedOut: result.timedOut,
+    timeoutMs,
+    durationMs: Date.now() - startedAt,
     outputTail,
     reason: passed
       ? undefined

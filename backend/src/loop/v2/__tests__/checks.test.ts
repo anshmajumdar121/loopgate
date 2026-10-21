@@ -63,6 +63,8 @@ describe("v2 deterministic checks", () => {
     const check = results.find((result) => result.id === "vitest");
     expect(check?.passed).toBe(true);
     expect(check?.exitCode).toBe(0);
+    expect(check?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(check?.timeoutMs).toBe(10_000);
   });
 
   it("treats a non-zero command as a failure", async () => {
@@ -87,6 +89,7 @@ describe("v2 deterministic checks", () => {
     const check = results.find((result) => result.id === "hang");
     expect(check?.passed).toBe(false);
     expect(check?.timedOut).toBe(true);
+    expect(check?.durationMs).toBeLessThanOrEqual((check?.timeoutMs ?? 100) + 2_000);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });

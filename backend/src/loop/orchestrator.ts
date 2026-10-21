@@ -1502,6 +1502,11 @@ try {
             itemId: `item:${taskId}`,
             attemptId: `attempt:${taskId}:${attempt}`,
           });
+          for (const check of deterministicChecks) {
+            if (check.kind === "check") {
+              log("orchestrator", check.passed ? "info" : "stderr", `CHECK_RESULT ${JSON.stringify(check)}`);
+            }
+          }
           const failed = deterministicChecks.filter((check) => !check.passed);
           if (failed.length > 0) {
             log("orchestrator", "stderr", `✗ DETERMINISTIC CHECKS — ${failed.map((check) => check.reason ?? check.id).join("; ")}`);
