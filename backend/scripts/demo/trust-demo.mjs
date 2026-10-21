@@ -176,7 +176,7 @@ const raw = (text) =>
 let llm, model;
 const results = [];
 async function check(name, keywords, fn) {
-  if (filter.length && !filter.some((f) => keywords.includes(f) || name.toLowerCase().includes(f))) return;
+  if (filter.length && !filter.some((f) => f === name || keywords.includes(f))) return;
   process.stdout.write(`${C.d}…${C.x} ${name}`);
   const t0 = Date.now();
   let ok = false, detail = "";
