@@ -16,6 +16,7 @@ import {
   extname,
   sep,
 } from "node:path";
+import { isPublicDemo } from "../demo/publicDemo.js";
 
 const PREVIEW_PORT = Number(process.env.LOOP_PREVIEW_PORT || 3210);
 /** Loopback only — previews are for the local user, never the LAN. */
@@ -175,6 +176,10 @@ export function getPreviewServerBindCount(): number {
 
 /** Register (or re-register) a task's workdir. Returns the preview URL. */
 export async function registerPreview(taskId: string, workdir: string): Promise<string> {
+  // Public demo: the loopback preview port isn't reachable by visitors and
+  // its pages would feed the (disabled) runtime check. Callers treat the
+  // preview as best-effort and log this.
+  if (isPublicDemo()) throw new Error("previews are disabled in the public demo");
   registry.set(taskId, pathResolve(workdir));
   await ensureServer();
   return `http://localhost:${actualPort}/t/${taskId}/`;

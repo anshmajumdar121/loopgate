@@ -28,8 +28,11 @@ ${task}
 None.
 `;
 
+// The task text is user input: escape it so a prompt can never smuggle
+// markup or script into the generated page (the public demo serves these).
+const esc = (s) => s.replace(/[&<>"'`]/g, (c) => `&#${c.charCodeAt(0)};`);
 const page = (title) =>
-  `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body><h1>${title}</h1></body></html>`;
+  `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title></head><body><h1>${esc(title)}</h1></body></html>`;
 const file = (p, c) => "```file:" + p + "\n" + c + "\n```\n";
 const verdict = (n, line, { scope = "PASS", extra = "" } = {}) => `## Verifier Verdict — Attempt ${n}
 
@@ -68,7 +71,10 @@ function reply(mode, role, attempt, userText) {
   return verdict(attempt, "APPROVE");
 }
 
-export function startFakeLlm({ port = 4010, delayMs = 800 } = {}) {
+// lockMode: ignore /__mode/ requests (the public demo pins "happy" so nothing
+// that reaches the loopback port can switch the LLM into an attack mode).
+// port 0 picks a free port; the resolved one is in the returned url.
+export function startFakeLlm({ port = 4010, delayMs = 800, lockMode = false } = {}) {
   let mode = "happy";
   const calls = [];
   const server = http.createServer((req, res) => {
@@ -76,6 +82,10 @@ export function startFakeLlm({ port = 4010, delayMs = 800 } = {}) {
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       if (req.url.startsWith("/__mode/")) {
+        if (lockMode) {
+          res.statusCode = 403;
+          return res.end("mode is locked");
+        }
         mode = decodeURIComponent(req.url.slice(8));
         return res.end("ok");
       }
@@ -125,8 +135,8 @@ export function startFakeLlm({ port = 4010, delayMs = 800 } = {}) {
   return new Promise((resolve) =>
     server.listen(port, "127.0.0.1", () =>
       resolve({
-        url: `http://127.0.0.1:${port}/v1`,
-        setMode: (m) => (mode = m),
+        url: `http://127.0.0.1:${server.address().port}/v1`,
+        setMode: (m) => (lockMode ? undefined : (mode = m)),
         calls,
         close: () => server.close(),
       })

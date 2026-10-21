@@ -22,6 +22,7 @@ import { readFile, access, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { runProcess } from "./v2/process-runner.js";
+import { isPublicDemo } from "../demo/publicDemo.js";
 
 export interface BuildRunResult {
   installMs?: number;
@@ -122,6 +123,8 @@ export async function runBuildStep(
   workdir: string,
   log?: (line: string) => void
 ): Promise<BuildRunResult | undefined> {
+  // Public demo: never npm install/build/test anything a run produced.
+  if (isPublicDemo()) return undefined;
   let pkgRaw: string;
   try {
     pkgRaw = await readFile(join(workdir, "package.json"), "utf8");

@@ -1,9 +1,12 @@
-backend/node_modules
+# Never ship local state: backend/data holds _connections.json (plaintext API keys).
+**/node_modules
+**/dist
 backend/data
-backend/dist
-ui/node_modules
-ui/dist
+backend/.loop
+**/.env
+**/.env.*
 .git
-.gitignore
-loop-rt/node_modules
-loop-rt/**/dist
+.claude
+.opencode
+docs
+*.log

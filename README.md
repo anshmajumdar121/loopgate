@@ -8,6 +8,10 @@
 
 ![Loopgate demo: a batch of landing pages planned, made and verified item by item](docs/media/loopgate-demo.gif)
 
+🌐 **Live demo preview: [anshmajumdar121.github.io/loopgate](https://anshmajumdar121.github.io/loopgate/)** — no login, no install.
+It replays a recorded real run in your browser, so it is a demo preview for testing, **not the full project**:
+nothing you type is executed. To run Loopgate for real, see [Try it in 60 seconds](#try-it-in-60-seconds-no-api-key-no-network).
+
 ## Try it in 60 seconds (no API key, no network)
 
 ```bash
@@ -134,6 +138,7 @@ Each item runs as a normal task in `<workdir>/item-NNN/` with `autoApprovePlan` 
 | `LOOP_CONNECTION_PROBE_TIMEOUT_MS` | `10000` | connection health/preflight deadline |
 | `LOOP_ENFORCE_ALLOWLIST` | on | set `0` to allow writes outside `Files to touch` (reserved files and the denylist always apply) |
 | `LOOP_ALLOW_MOCK` | off | explicit opt-in to mock agents |
+| `LOOP_PUBLIC_DEMO` | off | `1` = locked-down public demo: fake LLM only, read-only connections, temp dirs, capped runs, serves the built UI ([docs/DEPLOY_DEMO.md](docs/DEPLOY_DEMO.md)) |
 
 ## Tests
 
@@ -157,5 +162,6 @@ cd ui && npm test          # 40 tests
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, tests and PR expectations
 - [SECURITY.md](SECURITY.md): threat model, known gaps and private reporting
+- [docs/DEPLOY_DEMO.md](docs/DEPLOY_DEMO.md): host a safe public demo (Render, free)
 - [docs/LAUNCH.md](docs/LAUNCH.md): launch and outreach plan
 - [LICENSE](LICENSE): MIT

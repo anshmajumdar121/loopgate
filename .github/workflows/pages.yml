@@ -1,0 +1,53 @@
+# Publishes the static demo preview to GitHub Pages:
+#   https://<owner>.github.io/<repo>/
+# The page replays a recorded real run in the browser (ui/src/staticDemo) and
+# says clearly that it is a preview, not the full project. One-time setup:
+# repo Settings → Pages → Source: "GitHub Actions". See docs/DEPLOY_DEMO.md.
+name: Demo preview (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths: ["ui/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # npm 11 (Node 24) — npm 10 rejects ui/package-lock.json in `npm ci`.
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: ui
+      - name: Build the static preview
+        working-directory: ui
+        env:
+          VITE_STATIC_DEMO: "1"
+        run: npx vite build --base "/${{ github.event.repository.name }}/" --outDir dist-pages --emptyOutDir
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ui/dist-pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

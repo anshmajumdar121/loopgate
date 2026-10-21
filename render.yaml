@@ -1,0 +1,21 @@
+# Render Blueprint for the Loopgate public demo (free plan, Docker).
+# New → Blueprint → pick this repo; Render reads this file. Steps and
+# limits: docs/DEPLOY_DEMO.md. The Dockerfile already sets
+# LOOP_PUBLIC_DEMO=1 and LOOP_HOST=0.0.0.0; they're repeated here so the
+# service is locked down even if someone swaps the Dockerfile's env.
+# Render injects PORT and RENDER_EXTERNAL_HOSTNAME (auto-allowlisted).
+services:
+  - type: web
+    name: loopgate-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: LOOP_PUBLIC_DEMO
+        value: "1"
+      - key: LOOP_HOST
+        value: 0.0.0.0
+      # Optional: a custom domain, comma-separated (the onrender.com host is automatic).
+      # - key: LOOP_ALLOWED_HOSTS
+      #   value: demo.example.com

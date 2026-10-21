@@ -8,6 +8,7 @@
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isPublicDemo } from "../demo/publicDemo.js";
 
 export interface RuntimeCheckResult {
   ok: boolean;
@@ -29,6 +30,8 @@ export async function runRuntimeCheck(
   workdir: string,
   attempt: number
 ): Promise<RuntimeCheckResult> {
+  // Never point a server-side browser at visitor-influenced HTML.
+  if (isPublicDemo()) throw new Error("runtime check is disabled in the public demo");
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   const failedRequests: string[] = [];
