@@ -1,6 +1,7 @@
 import type { AntiCheatResult } from "./anti-cheat.js";
 import type { DeterministicCheckResult, CheckEventSink } from "./checks.js";
 import type { PlanSchema, VerdictSchema } from "./schemas.js";
+import { isDefenceDisabled } from "./defence-flags.js";
 
 export interface GateRuntimeEvidence {
   required: boolean;
@@ -59,11 +60,14 @@ export function evaluateApprovalGate(input: ApprovalGateInput): ApprovalGateDeci
   const failedChecks = input.checks.filter((check) => !check.passed);
   for (const check of failedChecks) {
     if (check.kind === "file") {
+      if (isDefenceDisabled("missing-file")) continue;
       const file = check.id.replace(/^file:/, "");
       reasons.push(`gate:file-missing:${file}${check.reason ? `: ${check.reason}` : ""}`);
     } else if (check.timedOut) {
+      if (isDefenceDisabled("check-timeout")) continue;
       reasons.push(`gate:check-timeout:${check.id}: timed out${check.reason ? `: ${check.reason}` : ""}`);
     } else {
+      if (isDefenceDisabled("check-failed")) continue;
       reasons.push(`gate:check-failed:${check.id}: exit ${check.exitCode ?? "none"}${check.reason ? `: ${check.reason}` : ""}`);
     }
   }
@@ -72,7 +76,7 @@ export function evaluateApprovalGate(input: ApprovalGateInput): ApprovalGateDeci
   if (!input.writePolicy.clean) reasons.push(...(input.writePolicy.reasons ?? ["write policy violation"]));
 
   if (input.runtime?.required) {
-    if (!input.runtime.available) reasons.push(`gate:runtime-unavailable: ${input.runtime.reason ?? "runtime check unavailable"}`);
+    if (!input.runtime.available && !isDefenceDisabled("runtime-unavailable")) reasons.push(`gate:runtime-unavailable: ${input.runtime.reason ?? "runtime check unavailable"}`);
     else if (!input.runtime.passed) reasons.push(`gate:runtime-failed: ${input.runtime.reason ?? "runtime check failed"}`);
   }
 
@@ -91,7 +95,9 @@ export function evaluateApprovalGate(input: ApprovalGateInput): ApprovalGateDeci
   for (const criterion of input.plan.criteria) {
     const cited = input.verifier.criteria.find((item) => item.id === criterion.id);
     if (!cited) {
-      reasons.push(`gate:evidence-missing:${criterion.id}: criterion has no verifier evidence`);
+      if (!isDefenceDisabled("evidence-missing")) {
+        reasons.push(`gate:evidence-missing:${criterion.id}: criterion has no verifier evidence`);
+      }
       continue;
     }
     if (!cited.passed) reasons.push(`gate:criterion-failed:${criterion.id}`);
@@ -102,14 +108,18 @@ export function evaluateApprovalGate(input: ApprovalGateInput): ApprovalGateDeci
       : undefined;
     if (cited.evidence.kind === "check") {
       if (!evidence || evidence.kind !== "check" || !evidence.passed) {
-        reasons.push(`gate:evidence-missing:${evidenceRef}: criterion ${criterion.id} cites a check that did not pass`);
+        if (!isDefenceDisabled("evidence-missing")) {
+          reasons.push(`gate:evidence-missing:${evidenceRef}: criterion ${criterion.id} cites a check that did not pass`);
+        }
       }
     } else if (
       (!evidenceFile || evidenceFile.kind !== "file" || !evidenceFile.passed) &&
       !existingFiles.has(evidenceRef) &&
       !existingFiles.has(evidenceRef.replace(/^file:/, ""))
     ) {
-      reasons.push(`gate:file-missing:${evidenceRef.replace(/^file:/, "")}: criterion ${criterion.id} cites a file that does not exist`);
+      if (!isDefenceDisabled("missing-file")) {
+        reasons.push(`gate:file-missing:${evidenceRef.replace(/^file:/, "")}: criterion ${criterion.id} cites a file that does not exist`);
+      }
     }
   }
 

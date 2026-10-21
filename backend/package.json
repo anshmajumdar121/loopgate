@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "demo:trust": "node scripts/demo/trust-demo.mjs",
+    "demo:trust:mutation": "node scripts/demo/trust-mutation.mjs",
     "demo:fake-llm": "node scripts/demo/fake-llm.mjs",
     "demo:stack": "node scripts/demo/demo-stack.mjs"
   },

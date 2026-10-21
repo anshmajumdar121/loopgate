@@ -70,6 +70,7 @@ import { runDeterministicChecks, type DeterministicCheckResult } from "./v2/chec
 import { inspectMakerAttempt, snapshotWorkdir, type AntiCheatResult, type WorkdirSnapshot } from "./v2/anti-cheat.js";
 import { evaluateApprovalGate, canUseScriptThreshold, type ApprovalGateDecision } from "./v2/gate.js";
 import { parseStructuredVerdict, PlanSchema, type PlanSchema as PlanSchemaType, type VerdictSchema } from "./v2/schemas.js";
+import { isDefenceDisabled } from "./v2/defence-flags.js";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { isPublicDemo } from "../demo/publicDemo.js";
@@ -1738,7 +1739,26 @@ try {
       let { verdict } = structuredVerifier
         ? legacyVerdictFromStructured(structuredVerifier, structuredPlan)
         : parseStateDiff(verifierResponse);
-      if (structuredResponse.malformed) {
+      if (structuredResponse.malformed && isDefenceDisabled("malformed-verdict")) {
+        verdict = {
+          attempt,
+          outcome: "APPROVE",
+          buildExit: null,
+          testsPassed: 0,
+          testsFailed: 0,
+          scopePass: true,
+          intentPass: true,
+          noCheatingPass: true,
+          risk: "LOW",
+          criteriaWalk: (structuredPlan?.criteria ?? []).map((criterion) => ({
+            criterion: criterion.text,
+            passed: true,
+            evidence: `file:${structuredPlan?.filesToTouch[0] ?? ""}`,
+          })),
+          requiredFixes: [],
+          oneLineReason: "mock-disabled malformed-verdict defence",
+        };
+      } else if (structuredResponse.malformed) {
         verdict = {
           attempt,
           outcome: "REJECT",
@@ -1908,7 +1928,7 @@ try {
             reason: runtimeUnavailableReason ?? (runtime && !runtime.ok ? "runtime check failed" : undefined),
           },
           goalText: `${initialTask.prompt}\n${latestGoal}`,
-          malformedVerdict: structuredResponse.malformed,
+          malformedVerdict: structuredResponse.malformed && !isDefenceDisabled("malformed-verdict"),
           eventLog,
           runId: `run:${taskId}`,
           itemId: `item:${taskId}`,

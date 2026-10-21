@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { runProcess, type ProcessRunResult } from "./process-runner.js";
 import type { PlanSchema } from "./schemas.js";
+import { isDefenceDisabled } from "./defence-flags.js";
 
 export interface CheckEventSink {
   appendEvent(input: {
@@ -88,6 +89,9 @@ async function checkDeclaredFile(root: string, file: string): Promise<Determinis
     await access(candidate);
     return { id: `file:${file}`, kind: "file", ref, passed: true };
   } catch {
+    if (isDefenceDisabled("missing-file")) {
+      return { id: `file:${file}`, kind: "file", ref, passed: true };
+    }
     return {
       id: `file:${file}`,
       kind: "file",
@@ -131,7 +135,7 @@ async function runDeclaredCheck(
       executable,
       args,
       cwd: options.workdir,
-      timeoutMs,
+      timeoutMs: isDefenceDisabled("check-timeout") ? 0 : timeoutMs,
       stdoutTailBytes: options.stdoutTailBytes ?? DEFAULT_TAIL_BYTES,
       stderrTailBytes: options.stderrTailBytes ?? DEFAULT_TAIL_BYTES,
     });

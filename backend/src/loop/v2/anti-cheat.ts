@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath, readlink } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isDefenceDisabled } from "./defence-flags.js";
 
 export interface SnapshotEntry {
   path: string;
@@ -59,15 +60,17 @@ export async function inspectMakerAttempt(
   const changes = diffSnapshots(before, after);
   const reasons: string[] = [];
 
-  for (const attempted of options.attemptedPaths ?? []) {
-    if (isUnsafeRelativePath(attempted)) {
-      reasons.push(`policy:path-escape:${attempted}`);
+  if (!isDefenceDisabled("path-escape")) {
+    for (const attempted of options.attemptedPaths ?? []) {
+      if (isUnsafeRelativePath(attempted)) {
+        reasons.push(`policy:path-escape:${attempted}`);
+      }
     }
-  }
 
-  for (const entry of after.entries.values()) {
-    if (entry.kind === "symlink" && entry.resolvesOutside) {
-      reasons.push(`policy:path-escape:symlink:${entry.path}`);
+    for (const entry of after.entries.values()) {
+      if (entry.kind === "symlink" && entry.resolvesOutside) {
+        reasons.push(`policy:path-escape:symlink:${entry.path}`);
+      }
     }
   }
 
@@ -83,7 +86,7 @@ export async function inspectMakerAttempt(
     const beforeText = change.before?.content ?? "";
     const afterText = change.after.content ?? "";
     if (isTestFile(change.path)) {
-      if (introducedCheat(beforeText, afterText)) {
+      if (!isDefenceDisabled("skip-added") && introducedCheat(beforeText, afterText)) {
         reasons.push(`anti-cheat:skip-added: test modifier (.skip/.only/.todo) added: ${change.path}`);
       }
       const beforeAssertions = countAssertions(beforeText);
@@ -93,14 +96,14 @@ export async function inspectMakerAttempt(
           `anti-cheat:assertions-lowered:${change.path} (${beforeAssertions} → ${afterAssertions})`,
         );
       }
-      if (introducedTrivialAssertion(beforeText, afterText)) {
+      if (!isDefenceDisabled("trivial-assertion") && introducedTrivialAssertion(beforeText, afterText)) {
         reasons.push(`anti-cheat:trivial-assertion: trivially-true assertion added: ${change.path}`);
       }
     }
-    if (isTestConfig(change.path)) {
+    if (!isDefenceDisabled("test-policy") && isTestConfig(change.path)) {
       reasons.push(`anti-cheat:test-policy: test config edited: ${change.path}`);
     }
-    if (change.path.replaceAll("\\", "/") === "package.json" && packageTestPolicyChanged(beforeText, afterText)) {
+    if (!isDefenceDisabled("test-policy") && change.path.replaceAll("\\", "/") === "package.json" && packageTestPolicyChanged(beforeText, afterText)) {
       reasons.push("anti-cheat:test-policy: package.json test script or coverage threshold edited");
     }
   }
