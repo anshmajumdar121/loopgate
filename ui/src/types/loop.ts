@@ -356,6 +356,8 @@ export type ConnectionProviderId =
   | "ollama"
   | "local-cli"
   | "mavis-cli"
+  | "gemini-cli"
+  | "kimi-cli"
   | "custom";
 
 export interface ConnectionModel {

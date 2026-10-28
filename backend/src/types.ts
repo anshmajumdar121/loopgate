@@ -482,6 +482,8 @@ export type ConnectionProviderId =
   | "ollama"
   | "local-cli"
   | "mavis-cli"
+  | "gemini-cli"
+  | "kimi-cli"
   | "custom";
 
 /** A single model exposed by a Connection. The `id` is what the upstream

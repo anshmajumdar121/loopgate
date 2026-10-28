@@ -138,6 +138,36 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: [],
   },
   {
+    id: "gemini-cli",
+    name: "Gemini CLI (Google login)",
+    description:
+      "Runs the loop through your machine's `gemini` CLI — no API key. Install with `npm i -g @google/gemini-cli`, run `gemini` once and pick Login with Google.",
+    providerType: "local-cli",
+    defaultBaseUrl: "http://localhost/gemini-cli",
+    endpointHint: "(not used in CLI mode)",
+    apiKeyHint: "(not needed)",
+    noKey: true,
+    temperatureDefault: 0.7,
+    models: [
+      { id: "default", label: "CLI default (auto)" },
+      { id: "pro", label: "Gemini Pro" },
+      { id: "flash", label: "Gemini Flash" },
+    ],
+  },
+  {
+    id: "kimi-cli",
+    name: "Kimi Code CLI (Kimi login)",
+    description:
+      "Runs the loop through your machine's `kimi` CLI (Kimi Code) — no API key. Install with `npm i -g @moonshot-ai/kimi-code`, then run `kimi login`. Kimi gets read-only tools; Loopgate does the writing.",
+    providerType: "local-cli",
+    defaultBaseUrl: "http://localhost/kimi-cli",
+    endpointHint: "(not used in CLI mode)",
+    apiKeyHint: "(not needed)",
+    noKey: true,
+    temperatureDefault: 0.7,
+    models: [{ id: "default", label: "CLI default" }],
+  },
+  {
     id: "mavis-cli",
     name: "MiniMax Pro (Mavis CLI)",
     description:

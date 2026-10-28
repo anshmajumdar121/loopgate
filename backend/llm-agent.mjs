@@ -14,7 +14,9 @@
 //                         CLI (`claude -p <prompt>`) instead of calling an
 //                         OpenAI-compatible endpoint. api-key becomes
 //                         optional when this is set. Override the binary
-//                         via LOOP_CLI_BIN (default "claude").
+//                         via LOOP_CLI_BIN (default "claude"). LOOP_CLI_TOOL
+//                         picks claude | gemini | kimi (see cli-tools.mjs);
+//                         LOOP_CLI_MODEL is passed to gemini/kimi as -m.
 //
 // Env overrides (set by the orchestrator's spawner):
 //   LOOP_SYSTEM_PROMPT — full system prompt (overrides file-loaded .md)
@@ -340,25 +342,34 @@ try {
     // OpenAI-compatible endpoint. Same systemPrompt/userPrompt inputs, same
     // downstream dispatch — the orchestrator/watcher/parser never know the
     // difference.
-    const { spawnSync } = await import("node:child_process");
+    // Which CLI (claude / gemini / kimi) comes from LOOP_CLI_TOOL; see
+    // cli-tools.mjs for each tool's argv/stdin contract.
+    const { runCliTool } = await import("./cli-tools.mjs");
     const full =
       (systemPrompt ? systemPrompt + "\n\n---\n\n" : "") + userPrompt;
-    const bin = process.env.LOOP_CLI_BIN || "claude";
-    const r = spawnSync(bin, ["-p", full, "--output-format", "text"], {
-      cwd: args.workdir,
-      encoding: "utf8",
-      timeout: 25 * 60_000,
-      maxBuffer: 32 * 1024 * 1024,
-    });
+    const tool = process.env.LOOP_CLI_TOOL || "claude";
+    let r;
+    try {
+      r = runCliTool({
+        tool,
+        bin: process.env.LOOP_CLI_BIN,
+        model: process.env.LOOP_CLI_MODEL,
+        prompt: full,
+        workdir: args.workdir,
+      });
+    } catch (err) {
+      process.stderr.write(`llm-agent: FAIL: local CLI (${tool}): ${err.message}\n`);
+      process.exit(1);
+    }
     if (r.error) {
       process.stderr.write(
-        `llm-agent: FAIL: local CLI spawn error: ${r.error.message}\n`
+        `llm-agent: FAIL: local CLI spawn error: [${tool}] ${r.error.message}\n`
       );
       process.exit(1);
     }
     if (r.status !== 0) {
       process.stderr.write(
-        `llm-agent: FAIL: local CLI exit ${r.status}: ${(r.stderr || "").slice(0, 300)}\n`
+        `llm-agent: FAIL: local CLI exit ${r.status}: [${tool}] ${(r.stderr || "").slice(0, 300)}\n`
       );
       process.exit(1);
     }

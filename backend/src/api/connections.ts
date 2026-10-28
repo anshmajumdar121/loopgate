@@ -37,7 +37,7 @@ const connectionSchema = z.object({
   name: z.string().min(1).max(80),
   description: z.string().max(500).optional(),
   providerId: z
-    .enum(["openrouter", "openai", "anthropic", "google", "ollama", "local-cli", "mavis-cli", "custom"])
+    .enum(["openrouter", "openai", "anthropic", "google", "ollama", "local-cli", "mavis-cli", "gemini-cli", "kimi-cli", "custom"])
     .optional(),
   providerType: z.enum(["openai-compatible", "anthropic-compatible", "local-cli", "mavis-cli"]),
   baseUrl: z

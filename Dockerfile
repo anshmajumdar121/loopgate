@@ -29,7 +29,7 @@ ENV NODE_ENV=production \
 WORKDIR /app/backend
 COPY --from=build /app/backend/node_modules ./node_modules
 COPY --from=build /app/backend/dist ./dist
-COPY --from=build /app/backend/package.json /app/backend/llm-agent.mjs ./
+COPY --from=build /app/backend/package.json /app/backend/llm-agent.mjs /app/backend/cli-tools.mjs ./
 COPY --from=build /app/backend/scripts/demo ./scripts/demo
 COPY --from=build /app/ui/dist /app/ui/dist
 COPY loop-constraints.md /app/

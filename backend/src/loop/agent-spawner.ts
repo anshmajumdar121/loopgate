@@ -32,6 +32,7 @@ import {
 import { recordUsage } from "../store/tokenUsage.js";
 import { writeTrace, type TraceRecord, type TraceRole } from "../store/traces.js";
 import { spawnMavisBridge } from "./mavis-bridge.js";
+import { cliToolForConnection } from "./cli-tool.js";
 import { loadSystemPromptForRole } from "./role-prompts.js";
 import { assertPublicDemoSpawn, isPublicDemo } from "../demo/publicDemo.js";
 
@@ -267,6 +268,13 @@ function spawnBridgeRunner(
     LOOP_CONNECTION_NAME: connection?.name ?? "",
     LOOP_LLM_API_KEY: useLocalCli ? "" : apiKey,
   };
+  if (useLocalCli) {
+    // Which CLI to drive (claude / gemini / kimi) and, for gemini/kimi, the
+    // model the connection asked for. An explicit LOOP_CLI_TOOL in the
+    // backend's own env (manual LOOP_LOCAL_CLI=1 testing) is left alone.
+    if (connection) env.LOOP_CLI_TOOL = cliToolForConnection(connection);
+    env.LOOP_CLI_MODEL = connection?.model ?? "";
+  }
 
   let child: ChildProcess;
   try {
