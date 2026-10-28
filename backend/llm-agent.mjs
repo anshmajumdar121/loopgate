@@ -344,7 +344,7 @@ try {
     // difference.
     // Which CLI (claude / gemini / kimi) comes from LOOP_CLI_TOOL; see
     // cli-tools.mjs for each tool's argv/stdin contract.
-    const { runCliTool } = await import("./cli-tools.mjs");
+    const { runCliTool, parseCliOutput } = await import("./cli-tools.mjs");
     const full =
       (systemPrompt ? systemPrompt + "\n\n---\n\n" : "") + userPrompt;
     const tool = process.env.LOOP_CLI_TOOL || "claude";
@@ -373,7 +373,7 @@ try {
       );
       process.exit(1);
     }
-    text = (r.stdout || "").trim();
+    text = parseCliOutput(tool, r.stdout);
     process.stderr.write(
       `[${args.role}] CLI OK in ${Date.now() - t0}ms, ${text.length} chars\n`
     );

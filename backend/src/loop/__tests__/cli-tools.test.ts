@@ -68,6 +68,21 @@ describe("buildCliInvocation", () => {
     expect(ok.args.slice(-2)).toEqual(["-m", "kimi-code/kimi-for-coding"]);
   });
 
+  it("takes kimi's reply from the last assistant message in stream-json", async () => {
+    const { parseCliOutput } = await load();
+    const stdout = [
+      '{"role":"meta","type":"system.version","version":"2.4.0"}',
+      '{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"Read"}}]}',
+      '{"role":"tool","tool_call_id":"t1","content":"1\\tthe task"}',
+      '{"role":"assistant","content":"ALPHA\\n\\n## Verdict\\nAPPROVE"}',
+      '{"role":"meta","type":"session.resume_hint","content":"To resume this session: kimi -r x"}',
+      "",
+    ].join("\r\n");
+    expect(parseCliOutput("kimi", stdout)).toBe("ALPHA\n\n## Verdict\nAPPROVE");
+    expect(parseCliOutput("kimi", "not json")).toBe("");
+    expect(parseCliOutput("gemini", "  hi \n")).toBe("hi");
+  });
+
   it("rejects unknown tools", async () => {
     const { buildCliInvocation } = await load();
     expect(() => buildCliInvocation({ tool: "gpt", prompt: "P", workdir: "/w" })).toThrow(/unknown CLI tool/);

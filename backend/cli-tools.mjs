@@ -74,8 +74,10 @@ export function buildCliInvocation({ tool, bin, model, prompt, workdir, taskDir 
         args: [
           "-p",
           KIMI_PROMPT,
+          // Text mode prefixes replies with "• " bullets; stream-json gives
+          // the raw assistant content (see parseCliOutput).
           "--output-format",
-          "text",
+          "stream-json",
           "--agent-file",
           KIMI_AGENT_FILE,
           ...(m ? ["-m", m] : []),
@@ -97,6 +99,27 @@ export function quoteWinArg(a) {
   return /^[A-Za-z0-9._:/\\-]+$/.test(a) ? a : `"${a}"`;
 }
 
+/** The reply text from a CLI's stdout. kimi's stream-json is one JSON
+ *  message per line; the answer is the last assistant message with text
+ *  (earlier ones are tool calls such as reading TASK.md). */
+export function parseCliOutput(tool, stdout) {
+  const raw = stdout ?? "";
+  if (tool !== "kimi") return raw.trim();
+  let last = null;
+  for (const line of raw.split(/\r?\n/)) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (msg?.role === "assistant" && typeof msg.content === "string" && msg.content.trim()) {
+      last = msg.content;
+    }
+  }
+  return (last ?? "").trim();
+}
+
 /** Run the prompt through the CLI; returns spawnSync's result. */
 export function runCliTool({ tool, bin, model, prompt, workdir, timeoutMs = 25 * 60_000 }) {
   const needsTaskDir = tool === "kimi";
@@ -109,18 +132,20 @@ export function runCliTool({ tool, bin, model, prompt, workdir, timeoutMs = 25 *
     // npm installs gemini/kimi as .cmd shims on Windows, which Node can only
     // start through a shell. The claude path keeps its original direct spawn
     // (its prompt is in argv and must not pass through cmd.exe).
+    // Through the shell the line is pre-quoted and passed as one string
+    // (Node warns, DEP0190, when an args array is combined with shell).
     const viaShell = process.platform === "win32" && tool !== "claude" && tool != null;
-    const command = viaShell ? quoteWinArg(inv.bin) : inv.bin;
-    const args = viaShell ? inv.args.map(quoteWinArg) : inv.args;
-    return spawnSync(command, args, {
+    const opts = {
       cwd: inv.cwd,
       input: inv.input,
       encoding: "utf8",
       timeout: timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
-      shell: viaShell,
       windowsHide: true,
-    });
+    };
+    return viaShell
+      ? spawnSync([inv.bin, ...inv.args].map(quoteWinArg).join(" "), { ...opts, shell: true })
+      : spawnSync(inv.bin, inv.args, opts);
   } finally {
     if (taskDir) rmSync(taskDir, { recursive: true, force: true });
   }
